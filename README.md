@@ -122,6 +122,11 @@ tmux sessions.
   session with the same name, folder and group, and continues its agent's conversation there.
 - **Sessions you start yourself** (`tmux new -s foo`) appear under the host's **Others** section
   within 30 seconds.
+- **Scrolling history:** each pane has a scroll bar on the right; the wheel/trackpad works too.
+  For shells and normal output, it scrolls tmux's history (drag the thumb, click the track to
+  page, **Live** returns to the bottom). Full-screen apps such as Claude Code's full-screen UI,
+  vim or less keep their own history, so the bar becomes a strip that scrolls the app itself
+  (▲/▼ or a click to page, drag to scroll).
 - **Status dot:** blue = working, orange = waiting for you, green = idle, grey = no agent
   running, faint = unknown.
 

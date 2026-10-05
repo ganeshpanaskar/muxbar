@@ -561,3 +561,41 @@ func probeOutput(_ nonce: String, _ body: [String]) -> String {
     #expect(r.exitCode == 0, "\(r.stderr)")
     #expect(FileManager.default.fileExists(atPath: co + "/two") && FileManager.default.fileExists(atPath: co + "/installed.txt"))
 }
+
+@Test func fullscreenAppScrolling() {
+    // Claude Code's full-screen UI: alternate screen, mouse requested, no tmux history.
+    let cc = TmuxScroll.parse("0 0  69 1 1\n")!
+    #expect(cc.fullscreen && cc.appMouse && cc.history == 0 && cc.atLive)
+    let shell = TmuxScroll.parse("281 0  20 0 0")!
+    #expect(!shell.fullscreen && !shell.appMouse)
+    #expect(TmuxScroll.parse("1 0  20 1") == nil)
+
+    let up = TmuxScroll.appScrollScript(id: "$3", ticks: 2, mouse: true, col: 10, row: 34)
+    #expect(up == #"tmux send-keys -t '$3' -l "$(printf '\033[<64;10;34M\033[<64;10;34M')""#)
+    #expect(TmuxScroll.appScrollScript(id: "$3", ticks: -1, mouse: true).contains("[<65;"))
+    #expect(TmuxScroll.appScrollScript(id: "$3", ticks: -3, mouse: false) == "tmux send-keys -t '$3' Down Down Down")
+    #expect(TmuxScroll.appScrollScript(id: "$3", ticks: 0, mouse: true) == "true")
+    #expect(TmuxScroll.appScrollScript(id: "$3", ticks: 500, mouse: false).split(separator: " ").count == 4 + 30)
+    #expect(TmuxScroll.appPageScript(id: "$3", pages: 2) == "tmux send-keys -t '$3' PPage PPage")
+    #expect(TmuxScroll.appPageScript(id: "$3", pages: -1) == "tmux send-keys -t '$3' NPage")
+    #expect(TmuxScroll.appPageScript(id: "$3", pages: 0) == "true")
+}
+
+@Test func fullscreenAppReceivesWheelEvents() async throws {
+    // A real full-screen app on a private tmux server: it enables SGR mouse mode on the alternate
+    // screen and records what it reads; the wheel script must reach it as wheel-up events.
+    guard let tmux = findLocalTmux() else { return }
+    let q = shellQuote(tmux) + " -L muxbar-unit-\(UUID().uuidString.prefix(8))"
+    let out = FileManager.default.temporaryDirectory.appendingPathComponent("muxbar-wheel-\(UUID().uuidString)").path
+    let app = "printf '\\033[?1049h\\033[?1000h\\033[?1006h'; stty raw -echo; dd bs=1 count=24 of=\(out) 2>/dev/null; sleep 30"
+    _ = await shell("/bin/sh", ["-c", "\(q) -f /dev/null new-session -d -s w -x 80 -y 20 \(shellQuote(app))"])
+    try await Task.sleep(nanoseconds: 800_000_000)
+    let id = (await shell("/bin/sh", ["-c", "\(q) display -p -t w: '#{session_id}'"])).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+    let info = TmuxScroll.parse((await shell("/bin/sh", ["-c", TmuxScroll.infoScript(tmux: q, id: id)])).stdout)
+    #expect(info?.fullscreen == true && info?.appMouse == true)
+    _ = await shell("/bin/sh", ["-c", TmuxScroll.appScrollScript(tmux: q, id: id, ticks: 2, mouse: true, col: 10, row: 5)])
+    try await Task.sleep(nanoseconds: 800_000_000)
+    let got = (try? String(contentsOfFile: out, encoding: .utf8)) ?? ""
+    #expect(got == "\u{1B}[<64;10;5M\u{1B}[<64;10;5M", "got \(got.debugDescription)")
+    _ = await shell("/bin/sh", ["-c", "S=$(\(q) display -p '#{socket_path}'); \(q) kill-server; rm -f \"$S\" \(shellQuote(out))"])
+}

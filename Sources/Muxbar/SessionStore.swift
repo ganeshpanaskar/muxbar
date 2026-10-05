@@ -71,7 +71,7 @@ final class SessionStore: ObservableObject {
         startAllPollers()
     }
 
-    // MARK: Pane history scrolling (tmux copy mode, driven from the scroll bar and wheel)
+    // MARK: Pane history scrolling (tmux copy mode, or the full-screen app itself; driven from the scroll bar and wheel)
 
     @Published private(set) var scrollInfo: [String: TmuxScrollInfo] = [:]
     private var scrollBusy = Set<String>()
@@ -105,12 +105,30 @@ final class SessionStore: ObservableObject {
 
     func scrollPane(_ key: String, lines: Int) {
         guard lines != 0, let (_, id, tmux) = scrollTarget(key) else { return }
+        if let info = scrollInfo[key], info.fullscreen {
+            // A full-screen app keeps its own history: hand it the scrolling, one wheel event per
+            // line (Claude Code moves about a line per event).
+            runScroll(key) { TmuxScroll.appScrollScript(tmux: tmux, id: id, ticks: lines, mouse: info.appMouse,
+                                                        col: 10, row: max(1, info.height / 2)) }
+            return
+        }
         runScroll(key) { TmuxScroll.scrollScript(tmux: tmux, id: id, lines: lines) }
         if var i = scrollInfo[key] {   // optimistic, so the thumb follows immediately
             i.inMode = true
             i.position = min(i.history, max(0, i.position + lines))
             if i.position == 0 { i.inMode = false }
             scrollInfo[key] = i
+        }
+    }
+
+    /// Pages up (positive) or down: Page Up/Down keys for a full-screen app, else a screenful of
+    /// tmux history.
+    func scrollPane(_ key: String, pages: Int) {
+        guard pages != 0, let (_, id, tmux) = scrollTarget(key) else { return }
+        if let info = scrollInfo[key], info.fullscreen {
+            runScroll(key) { TmuxScroll.appPageScript(tmux: tmux, id: id, pages: pages) }
+        } else {
+            scrollPane(key, lines: pages * max(1, (scrollInfo[key]?.height ?? 24) - 2))
         }
     }
 

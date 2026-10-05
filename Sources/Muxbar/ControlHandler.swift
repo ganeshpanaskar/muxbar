@@ -117,15 +117,17 @@ enum ControlHandler {
                 return ok(["openPanes": store.state.openPanes.compactMap { store.state.sessions[$0]?.name },
                            "lastSelected": store.state.lastSelected.flatMap { store.state.sessions[$0]?.name } ?? ""])
             case "scroll":
-                // Test hook: --lines N (positive = back), or --to POSITION (0 = live); reports info.
+                // Test hook: --lines N / --pages N (positive = back), or --to POSITION (0 = live); reports info.
                 let rec = try store.resolve(host: try need("host"), ref: try need("id"))
+                if str("lines") != nil || str("pages") != nil, store.scrollInfo[rec.key] == nil { await store.refreshScrollInfo(rec.key) }
                 if let l = str("lines").flatMap(Int.init) { store.scrollPane(rec.key, lines: l) }
+                if let p = str("pages").flatMap(Int.init) { store.scrollPane(rec.key, pages: p) }
                 if let t = str("to").flatMap(Int.init) { store.scrollPane(rec.key, toPosition: t) }
                 try? await Task.sleep(nanoseconds: 900_000_000)
                 await store.refreshScrollInfo(rec.key)
                 let i = store.scrollInfo[rec.key]
                 return ok(["history": i?.history ?? -1, "position": i?.position ?? -1, "inMode": i?.inMode ?? false,
-                           "atLive": i?.atLive ?? true])
+                           "atLive": i?.atLive ?? true, "fullscreen": i?.fullscreen ?? false, "appMouse": i?.appMouse ?? false])
             case "waiting":
                 return ok(store.waitingSessions.map { r -> [String: Any] in
                     ["name": r.name, "host": r.host, "location": store.location(of: r),
@@ -365,7 +367,7 @@ enum CLI {
       kill --host H --id ID --yes | status --host H --id ID | dismiss-ended [--host H]
       workspace-root --host H | settings-set --root-host H --root PATH (empty = default)
       settings | settings-set [--terminal embedded|terminal|iterm] [--ssh-config PATH] [--default-command C]  (empty = plain shell)
-      scroll --host H --id ID [--lines N | --to POS] | type … then check atLive
+      scroll --host H --id ID [--lines N | --pages N | --to POS] | type … then check atLive
       waiting | next-waiting   (⌘J) | resume-ended --host H --id NAME | restore-state
       check-updates [--latest TAG] [--apply]   (no --apply = only report the decision)
       embedded | selected | window [--action close] | tabs | polling | simulate-sleep | simulate-wake | info | snapshot --out PNG [--what window] | quit

@@ -645,7 +645,7 @@ struct PaneView: View {
     var body: some View {
         ZStack(alignment: .trailing) {
             TerminalPaneHost(pane: pane, generation: pane.starts)
-                .padding(.trailing, rec.tmuxID != nil ? 14 : 0)
+                .padding(.trailing, rec.tmuxID != nil ? HistoryScrollBar.width + 4 : 0)
             if rec.tmuxID != nil, pane.isRunning {
                 HistoryScrollBar(key: rec.key)
             }
@@ -819,66 +819,124 @@ struct DraggableUnlessOutside: ViewModifier {
     }
 }
 
-/// Scroll bar for a session's history. The history lives in tmux (the pane shows tmux's screen),
-/// so the bar reads and drives tmux copy mode: drag, click above/below the thumb to page, or use
-/// the wheel/trackpad over the pane. "Live" returns to the bottom.
+/// Scroll bar for a session's history. Normally the history lives in tmux (the pane shows tmux's
+/// screen), so the bar reads and drives tmux copy mode: drag, click above/below the thumb to page,
+/// or use the wheel/trackpad over the pane. "Live" returns to the bottom.
+/// A full-screen app (e.g. Claude Code's full-screen UI) keeps its own history, so the bar turns
+/// into a scroll strip that sends scrolling to the app: ▲/▼ or click to page, drag to scroll.
 struct HistoryScrollBar: View {
     @EnvironmentObject var store: SessionStore
     var key: String
     @StateObject private var poll = ScrollPoller()
     @StateObject private var drag = DragState()
+    @State private var hover = false
+
+    static let width: CGFloat = 12
 
     var body: some View {
         let info = store.scrollInfo[key]
         ZStack(alignment: .bottomTrailing) {
-            GeometryReader { geo in
-                let h = geo.size.height
-                let top = (info?.thumbTop ?? 1) * h
-                let th = max(24, (info?.thumbHeight ?? 1) * h)
-                ZStack(alignment: .top) {
-                    RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(0.06))
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(Color.primary.opacity(drag.active ? 0.55 : 0.35))
-                        .frame(height: min(th, h))
-                        .offset(y: min(max(0, top), h - min(th, h)))
-                }
-                .frame(width: 10)
-                .contentShape(Rectangle())
-                .gesture(DragGesture(minimumDistance: 0)
-                    .onChanged { g in
-                        guard let info else { return }
-                        if !drag.active {
-                            drag.active = true
-                            let inThumb = g.startLocation.y >= top && g.startLocation.y <= top + th
-                            if !inThumb {
-                                // Click on the track: page up/down by a screen.
-                                let page = max(1, info.height - 2)
-                                store.scrollPane(key, lines: g.startLocation.y < top ? page : -page)
-                                drag.paging = true
-                                return
-                            }
-                            drag.grab = g.startLocation.y - top
-                        }
-                        guard !drag.paging else { return }
-                        let f = Double((g.location.y - drag.grab) / h)
-                        store.scrollPane(key, toPosition: info.position(forThumbTop: f))
-                    }
-                    .onEnded { _ in drag.active = false; drag.paging = false })
-                .help("Scroll back through this session's history")
+            Group {
+                if info?.fullscreen == true { appStrip(info!) } else { historyBar(info) }
             }
-            .frame(width: 10)
+            .frame(width: Self.width)
             .padding(.vertical, 4).padding(.trailing, 2)
-            if let info, !info.atLive {
+            .onHover { hover = $0 }
+            if let info, !info.fullscreen, !info.atLive {
                 Button { store.scrollPane(key, toPosition: 0) } label: {
                     Label("Live", systemImage: "arrow.down.to.line")
                 }
                 .buttonStyle(.borderedProminent).controlSize(.small)
-                .padding(.trailing, 20).padding(.bottom, 10)
+                .padding(.trailing, 22).padding(.bottom, 10)
                 .help("Back to live output (typing does this too)")
             }
         }
         .onAppear { poll.start(store: store, key: key) }
         .onDisappear { poll.stop() }
+    }
+
+    private var trackFill: Color { Color.primary.opacity(hover || drag.active ? 0.14 : 0.08) }
+
+    /// tmux history: a real thumb sized and placed by history length and position.
+    private func historyBar(_ info: TmuxScrollInfo?) -> some View {
+        GeometryReader { geo in
+            let h = geo.size.height
+            let top = (info?.thumbTop ?? 1) * h
+            let th = max(28, (info?.thumbHeight ?? 1) * h)
+            ZStack(alignment: .top) {
+                RoundedRectangle(cornerRadius: 6).fill(trackFill)
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color.primary.opacity(drag.active ? 0.6 : (hover ? 0.5 : 0.4)))
+                    .frame(height: min(th, h))
+                    .offset(y: min(max(0, top), h - min(th, h)))
+            }
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { g in
+                    guard let info else { return }
+                    if !drag.active {
+                        drag.active = true
+                        let inThumb = g.startLocation.y >= top && g.startLocation.y <= top + th
+                        if !inThumb {
+                            // Click on the track: page up/down by a screen.
+                            let page = max(1, info.height - 2)
+                            store.scrollPane(key, lines: g.startLocation.y < top ? page : -page)
+                            drag.paging = true
+                            return
+                        }
+                        drag.grab = g.startLocation.y - top
+                    }
+                    guard !drag.paging else { return }
+                    let f = Double((g.location.y - drag.grab) / h)
+                    store.scrollPane(key, toPosition: info.position(forThumbTop: f))
+                }
+                .onEnded { _ in drag.active = false; drag.paging = false })
+            .help(info.map { $0.history == 0 ? "No scrollback yet" : "Scroll back through \($0.history) lines of history" }
+                  ?? "Scroll back through this session's history")
+        }
+    }
+
+    /// Full-screen app: the app owns its history and position, so there's no thumb — ▲/▼ page,
+    /// clicking the upper/lower half pages, and dragging scrolls by the distance moved.
+    private func appStrip(_ info: TmuxScrollInfo) -> some View {
+        GeometryReader { geo in
+            let h = geo.size.height
+            VStack(spacing: 0) {
+                Image(systemName: "chevron.up").font(.system(size: 8, weight: .bold))
+                    .frame(width: Self.width, height: 18)
+                    .contentShape(Rectangle())
+                    .onTapGesture { store.scrollPane(key, pages: 1) }
+                Spacer(minLength: 0)
+                Capsule().fill(Color.primary.opacity(drag.active ? 0.6 : (hover ? 0.5 : 0.35)))
+                    .frame(width: 4, height: min(48, max(16, h / 6)))
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
+                    .frame(width: Self.width, height: 18)
+                    .contentShape(Rectangle())
+                    .onTapGesture { store.scrollPane(key, pages: -1) }
+            }
+            .foregroundStyle(Color.primary.opacity(hover ? 0.75 : 0.5))
+            .background(RoundedRectangle(cornerRadius: 6).fill(trackFill))
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { g in
+                    if !drag.active { drag.active = true; drag.grab = g.startLocation.y }
+                    // Every 4 points dragged = one line; up = back in history, like a thumb.
+                    let notches = Int((drag.grab - g.location.y) / 4)
+                    if notches != 0 {
+                        store.scrollPane(key, lines: notches)
+                        drag.grab -= CGFloat(notches) * 4
+                        drag.paging = true   // moved: not a click
+                    }
+                }
+                .onEnded { g in
+                    if !drag.paging, g.startLocation.y > 18, g.startLocation.y < h - 18 {
+                        store.scrollPane(key, pages: g.startLocation.y < h / 2 ? 1 : -1)
+                    }
+                    drag.active = false; drag.paging = false
+                })
+            .help("This app is full-screen and keeps its own history. Scroll here or with the wheel; ▲/▼ page.")
+        }
     }
 }
 
