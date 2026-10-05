@@ -5,6 +5,10 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject var store: SessionStore
     @StateObject private var m = SettingsModel()
+    @State private var editingAgent: AgentProfile?
+    @State private var originalAgentID: String?
+    @State private var showingAgentEditor = false
+    @State private var agentToDelete: AgentProfile?
 
     var body: some View {
         Form {
@@ -27,6 +31,41 @@ struct SettingsView: View {
                 }
                 Text("Runs when a session's terminal opens — any CLI works: claude, codex, gemini, grok, aider… Empty = just a shell.\(agentHint)")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            Section {
+                if store.settings.customAgents.isEmpty {
+                    Text("No custom agents yet.").foregroundStyle(.secondary)
+                }
+                ForEach(store.settings.customAgents) { agent in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(agent.name)
+                            Text(agent.command)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Edit") { beginEditing(agent) }
+                            .accessibilityLabel("Edit \(agent.name)")
+                        Button(role: .destructive) { agentToDelete = agent } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Remove \(agent.name)")
+                        .accessibilityLabel("Remove \(agent.name)")
+                    }
+                }
+                Button {
+                    editingAgent = AgentProfile(id: "", name: "", command: "")
+                    originalAgentID = nil
+                    showingAgentEditor = true
+                } label: {
+                    Label("Add Custom Agent", systemImage: "plus")
+                }
+            } header: {
+                Text("Custom agents")
+            } footer: {
+                Text("Profiles can define how Muxbar starts, detects, and resumes a command-line agent.")
             }
             Section("Terminal") {
                 Picker("Open sessions in", selection: Binding(
@@ -70,6 +109,30 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 520, height: 640)
         .onAppear { m.command = store.settings.defaultCommand }
+        .sheet(isPresented: $showingAgentEditor) {
+            if let editingAgent {
+                AgentProfileEditorView(
+                    profile: editingAgent,
+                    originalID: originalAgentID,
+                    existingAgents: store.settings.customAgents,
+                    onSave: saveAgent
+                )
+            }
+        }
+        .confirmationDialog("Remove custom agent?", isPresented: Binding(
+            get: { agentToDelete != nil },
+            set: { if !$0 { agentToDelete = nil } }
+        ), titleVisibility: .visible, presenting: agentToDelete) { agent in
+            Button("Remove \(agent.name)", role: .destructive) {
+                store.updateSettings { settings in
+                    settings.customAgents.removeAll { $0.id == agent.id }
+                }
+                agentToDelete = nil
+            }
+            Button("Cancel", role: .cancel) { agentToDelete = nil }
+        } message: { _ in
+            Text("Muxbar will stop using this profile's detection and resume settings. Existing terminal sessions are not changed.")
+        }
     }
 
     private var agentHint: String {
@@ -82,6 +145,160 @@ struct SettingsView: View {
         let c = m.command.trimmingCharacters(in: .whitespaces)
         store.updateSettings { $0.defaultCommand = c }
         m.command = c
+    }
+
+    private func beginEditing(_ agent: AgentProfile) {
+        editingAgent = agent
+        originalAgentID = agent.id
+        showingAgentEditor = true
+    }
+
+    private func saveAgent(_ agent: AgentProfile) {
+        store.updateSettings { settings in
+            if let originalAgentID,
+               let index = settings.customAgents.firstIndex(where: { $0.id == originalAgentID }) {
+                settings.customAgents[index] = agent
+            } else {
+                settings.customAgents.append(agent)
+            }
+        }
+        showingAgentEditor = false
+        editingAgent = nil
+        originalAgentID = nil
+    }
+}
+
+private struct AgentProfileEditorView: View {
+    @Environment(\.dismiss) private var dismiss
+    let profile: AgentProfile
+    let originalID: String?
+    let existingAgents: [AgentProfile]
+    let onSave: (AgentProfile) -> Void
+
+    @State private var id: String
+    @State private var name: String
+    @State private var command: String
+    @State private var processNames: String
+    @State private var resumeTemplate: String
+    @State private var continueCommand: String
+    @State private var waitingMarkers: String
+    @State private var workingMarkers: String
+    @State private var validationError: String?
+
+    init(profile: AgentProfile, originalID: String?, existingAgents: [AgentProfile], onSave: @escaping (AgentProfile) -> Void) {
+        self.profile = profile
+        self.originalID = originalID
+        self.existingAgents = existingAgents
+        self.onSave = onSave
+        _id = State(initialValue: profile.id)
+        _name = State(initialValue: profile.name)
+        _command = State(initialValue: profile.command)
+        _processNames = State(initialValue: profile.processNames.joined(separator: ", "))
+        _resumeTemplate = State(initialValue: profile.resumeTemplate ?? "")
+        _continueCommand = State(initialValue: profile.continueCommand ?? "")
+        _waitingMarkers = State(initialValue: profile.waitingMarkers.joined(separator: "\n"))
+        _workingMarkers = State(initialValue: profile.workingMarkers.joined(separator: "\n"))
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Identity") {
+                    TextField("Identifier", text: $id)
+                        .disabled(originalID != nil)
+                    if originalID != nil {
+                        Text("The identifier is stable because saved sessions refer to it.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    TextField("Name", text: $name)
+                    TextField("Command", text: $command)
+                        .font(.system(.body, design: .monospaced))
+                    Text("Required: a unique identifier, a display name, and the shell command to start the agent.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Section("Resume") {
+                    TextField("Resume command with {id}", text: $resumeTemplate)
+                        .font(.system(.body, design: .monospaced))
+                    TextField("Continue command", text: $continueCommand)
+                        .font(.system(.body, design: .monospaced))
+                    Text("Leave either field blank when the command is unsupported.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Section("Detection") {
+                    TextField("Process names (comma-separated)", text: $processNames)
+                        .font(.system(.body, design: .monospaced))
+                    Text("Leave process names blank to infer the executable from the start command.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    markerEditor("Waiting markers", text: $waitingMarkers)
+                    markerEditor("Working markers", text: $workingMarkers)
+                }
+                if let validationError {
+                    Text(validationError).font(.caption).foregroundStyle(.red)
+                }
+            }
+            .formStyle(.grouped)
+            .navigationTitle(originalID == nil ? "Add Custom Agent" : "Edit Custom Agent")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save", action: save)
+                        .keyboardShortcut(.defaultAction)
+                }
+            }
+            .frame(minWidth: 480, minHeight: 560)
+        }
+    }
+
+    private func markerEditor(_ title: String, text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+            TextEditor(text: text)
+                .font(.system(.body, design: .monospaced))
+                .frame(minHeight: 54, maxHeight: 72)
+            Text("One marker per line")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private func save() {
+        let trimmedID = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedID.isEmpty, !trimmedName.isEmpty, !trimmedCommand.isEmpty else {
+            validationError = "Identifier, name, and command are required."
+            return
+        }
+        if existingAgents.contains(where: { $0.id == trimmedID && $0.id != originalID }) {
+            validationError = "An agent with this identifier already exists."
+            return
+        }
+        let parsedProcessNames = splitList(processNames)
+        let profile = AgentProfile(
+            id: trimmedID,
+            name: trimmedName,
+            command: trimmedCommand,
+            processNames: parsedProcessNames.isEmpty ? nil : parsedProcessNames,
+            resumeTemplate: optionalText(resumeTemplate),
+            continueCommand: optionalText(continueCommand),
+            waitingMarkers: splitLines(waitingMarkers),
+            workingMarkers: splitLines(workingMarkers)
+        )
+        onSave(profile)
+    }
+
+    private func optionalText(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func splitList(_ value: String) -> [String] {
+        value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+    }
+
+    private func splitLines(_ value: String) -> [String] {
+        value.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
     }
 }
 

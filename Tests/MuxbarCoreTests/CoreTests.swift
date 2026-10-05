@@ -405,6 +405,26 @@ func probeOutput(_ nonce: String, _ body: [String]) -> String {
     #expect(st.settings.terminal == .iterm && st.settings.workspaceRoots.isEmpty)
 }
 
+@Test func customAgentSettingsRoundTrip() throws {
+    var state = AppState()
+    let agent = AgentProfile(
+        id: "my-agent",
+        name: "My Agent",
+        command: "my-agent --start",
+        processNames: ["my-agent", "agent-worker"],
+        resumeTemplate: "my-agent --resume {id}",
+        continueCommand: "my-agent --continue",
+        waitingMarkers: ["Approve this action?"],
+        workingMarkers: ["Thinking…"]
+    )
+    state.settings.customAgents = [agent]
+
+    let restored = try JSONDecoder().decode(AppState.self, from: JSONEncoder().encode(state))
+
+    #expect(restored.settings.customAgents == [agent])
+    #expect(restored.settings.agent(id: "my-agent") == agent)
+}
+
 @Test func outsideSessionsStayInOthers() {
     var st = AppState()
     var outside = SessionRecord(key: "local|$0|1", host: "local", tmuxID: "$0", created: 1, name: "hemant")
