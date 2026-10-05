@@ -1,0 +1,40 @@
+
+Resume this session with:
+claude --resume 51797b93-b3ab-40b6-9545-c4185af2c262
+user@mac muxbar-e2e-claude % 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

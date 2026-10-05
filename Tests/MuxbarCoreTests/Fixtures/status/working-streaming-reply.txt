@@ -1,0 +1,36 @@
+
+ ▐▛███▛█   Claude Code v2.1.288
+▝▜██████▀  Opus (1M context) · Claude Max
+ ▝▝   ▝▝   /private/tmp/muxbar-e2e-claude
+
+❯ Write a 700 word story about a lighthouse keeper and a storm. Do not use any tools.                                   
+
+⏺ The Keeper of Carrow Point
+
+  For thirty-one years, Edda Lisle had climbed the one hundred and fourteen steps of the Carrow Point lighthouse every
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                     tmux detected · scroll with PgUp/PgDn · or add 'set -g mouse on' to ~/.tmux.conf for wheel scroll
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯                                                                                     
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  /private/tmp/muxbar-e2e-claude  ·  Opus (1M context)  ·  ctx 90%
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents

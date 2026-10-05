@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>io.github.ganeshpanaskar.muxbar</string>
+    <key>CFBundleName</key>
+    <string>Muxbar</string>
+    <key>CFBundleDisplayName</key>
+    <string>Muxbar</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleExecutable</key>
+    <string>Muxbar</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@VERSION@</string>
+    <key>CFBundleVersion</key>
+    <string>@BUILD@</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.5</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Muxbar opens, focuses and names Terminal/iTerm2 windows for your sessions. It never reads or types into them except to start or reattach a session.</string>
+</dict>
+</plist>

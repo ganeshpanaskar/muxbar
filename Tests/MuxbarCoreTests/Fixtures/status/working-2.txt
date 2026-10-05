@@ -1,0 +1,36 @@
+
+ ▐▛███▛█   Claude Code v2.1.288
+▝▜██████▀  Opus (1M context) · Claude Max
+ ▝▝   ▝▝   /private/tmp/muxbar-e2e-claude
+
+❯ Write a 400 word story about a lighthouse. Do not use any tools.                                                      
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+✽ Considering… (6s · thinking)
+                                                                                                                      
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯                                                                  
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  /private/tmp/muxbar-e2e-claude  ·  Opus (1M context)
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents
