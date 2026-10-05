@@ -451,10 +451,10 @@ func probeOutput(_ nonce: String, _ body: [String]) -> String {
 
 @Test func tmuxScrollScriptsAgainstRealTmux() async throws {
     guard let tmux = findLocalTmux() else { return }
-    let name = "muxbar-unit-scroll-\(UUID().uuidString.prefix(6))"
-    let q = shellQuote(tmux)
-    _ = await shell("/bin/sh", ["-c", "\(q) new-session -d -s \(name) -x 80 -y 20 'seq 1 300; exec sleep 60'"])
-    defer { Task { _ = await shell("/bin/sh", ["-c", "\(q) kill-session -t '=\(name)'"]) } }
+    let name = "muxbar-unit-scroll"
+    // A private tmux server, so the test never shows up among (or touches) the user's sessions.
+    let q = shellQuote(tmux) + " -L muxbar-unit-\(UUID().uuidString.prefix(8))"
+    _ = await shell("/bin/sh", ["-c", "\(q) -f /dev/null new-session -d -s \(name) -x 80 -y 20 'seq 1 300; exec sleep 60'"])
     try await Task.sleep(nanoseconds: 700_000_000)
     let id = (await shell("/bin/sh", ["-c", "\(q) display -p -t '=\(name):' '#{session_id}'"])).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     func info() async -> TmuxScrollInfo? { TmuxScroll.parse((await shell("/bin/sh", ["-c", TmuxScroll.infoScript(tmux: q, id: id)])).stdout) }
@@ -465,6 +465,8 @@ func probeOutput(_ nonce: String, _ body: [String]) -> String {
     #expect((await info())?.position == 200)
     _ = await shell("/bin/sh", ["-c", TmuxScroll.gotoScript(tmux: q, id: id, position: 0)])
     #expect((await info())?.atLive == true)
+    // kill-server can leave the socket file behind; remove it too.
+    _ = await shell("/bin/sh", ["-c", "S=$(\(q) display -p '#{socket_path}'); \(q) kill-server; rm -f \"$S\""])
 }
 
 @Test func conversationScriptReadsCodexAndGemini() async throws {
