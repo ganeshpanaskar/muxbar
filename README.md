@@ -1,0 +1,2 @@
+# muxbar
+Session manager 
