@@ -465,7 +465,8 @@ func probeOutput(_ nonce: String, _ body: [String]) -> String {
     #expect((await info())?.position == 200)
     _ = await shell("/bin/sh", ["-c", TmuxScroll.gotoScript(tmux: q, id: id, position: 0)])
     #expect((await info())?.atLive == true)
-    _ = await shell("/bin/sh", ["-c", "\(q) kill-server"])
+    // kill-server can leave the socket file behind; remove it too.
+    _ = await shell("/bin/sh", ["-c", "S=$(\(q) display -p '#{socket_path}'); \(q) kill-server; rm -f \"$S\""])
 }
 
 @Test func conversationScriptReadsCodexAndGemini() async throws {
