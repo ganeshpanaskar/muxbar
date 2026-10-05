@@ -33,7 +33,7 @@ public enum HostHealth: Equatable, Codable, Sendable {
             let d = detail.trimmingCharacters(in: .whitespacesAndNewlines)
             return "Can't connect\(d.isEmpty ? "" : " (\(d))"). Check your network/VPN, your SSH credentials, and that the host is running."
         case .authExpired: return "SSH authentication failed — refresh your SSH key or certificate, then retry."
-        case .tmuxMissing: return "Install tmux on the host (e.g. `sudo apt install tmux` or `sudo dnf install tmux`)."
+        case .tmuxMissing: return "Install tmux: `brew install tmux` on a Mac, `sudo apt install tmux` or `sudo dnf install tmux` on Linux."
         case .tmuxTooOld: return "Muxbar needs tmux ≥ 2.6. Upgrade tmux on the host."
         }
     }

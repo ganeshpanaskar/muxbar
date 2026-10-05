@@ -3,7 +3,8 @@
 #   ./install.sh               build + install (also the update path: git pull && ./install.sh)
 #   ./install.sh --uninstall   remove the app (asks before deleting your data)
 #   ./install.sh --reset-permissions   also clear Muxbar's Automation grant so macOS asks again
-#   ./install.sh --root PATH   root folder for session workspaces (default ~/Muxbar; asked on first install)
+#   ./install.sh --root PATH   root folder for session workspaces (default ~/muxbar-sessions; asked on first install)
+#   ./install.sh --no-tmux     don't install tmux (local sessions then won't survive being closed)
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -39,13 +40,15 @@ uninstall() {
 
 reset_tcc=false
 root_arg=""
+install_tmux=true
 while [ $# -gt 0 ]; do
   case "$1" in
     --uninstall) uninstall ;;
     --reset-permissions) reset_tcc=true ;;
+    --no-tmux) install_tmux=false ;;
     --root) shift; [ -n "${1:-}" ] || die "--root needs a path"; root_arg="$1" ;;
     --root=*) root_arg="${1#--root=}" ;;
-    *) die "unknown option $1 (use --uninstall, --reset-permissions, --root PATH or nothing)" ;;
+    *) die "unknown option $1 (use --uninstall, --reset-permissions, --root PATH, --no-tmux or nothing)" ;;
   esac
   shift
 done
@@ -68,6 +71,35 @@ fi
 sv=$(swift --version 2>/dev/null | sed -n 's/.*Swift version \([0-9]*\)\..*/\1/p' | head -1)
 [ -n "$sv" ] && [ "$sv" -ge 6 ] || die "Swift 6 or later is required (found: ${sv:-none}). Update Command Line Tools via Software Update."
 
+# 4. tmux keeps local sessions alive when a pane or Muxbar closes. Muxbar looks in the
+#    Homebrew and MacPorts locations, so install it with whichever one is present.
+find_tmux() {
+  for p in /opt/homebrew/bin/tmux /usr/local/bin/tmux /opt/local/bin/tmux /usr/bin/tmux; do
+    [ -x "$p" ] && { echo "$p"; return 0; }
+  done
+  return 1
+}
+if find_tmux >/dev/null; then
+  say "tmux found: $(find_tmux)"
+elif ! $install_tmux; then
+  say "Skipping tmux (--no-tmux): local sessions won't survive being closed"
+else
+  brew_bin=$(command -v brew || { [ -x /opt/homebrew/bin/brew ] && echo /opt/homebrew/bin/brew; } || { [ -x /usr/local/bin/brew ] && echo /usr/local/bin/brew; } || true)
+  if [ -n "$brew_bin" ]; then
+    say "Installing tmux with Homebrew"
+    "$brew_bin" install tmux || die "brew install tmux failed. Fix it and re-run, or use --no-tmux."
+  elif command -v port >/dev/null 2>&1; then
+    say "Installing tmux with MacPorts (asks for your password)"
+    sudo port install tmux || die "port install tmux failed. Fix it and re-run, or use --no-tmux."
+  else
+    die "tmux isn't installed and neither Homebrew nor MacPorts was found.
+  Install Homebrew (https://brew.sh) and re-run, or run ./install.sh --no-tmux to continue without it
+  (local sessions then won't survive being closed)."
+  fi
+  find_tmux >/dev/null || die "tmux still not found after installing it."
+  say "tmux installed: $(find_tmux)"
+fi
+
 updating=false
 [ -d "$APP" ] && updating=true
 
@@ -81,12 +113,21 @@ if [ -n "$root_arg" ]; then
 elif [ -n "$current_root" ]; then
   ws_root="$current_root"
 elif [ -t 0 ]; then
-  read -r -p "Root folder for session workspaces [~/Muxbar]: " ws_root || true
-  ws_root="${ws_root:-~/Muxbar}"
+  read -r -p "Root folder for session workspaces [~/muxbar-sessions]: " ws_root || true
+  ws_root="${ws_root:-~/muxbar-sessions}"
 else
-  ws_root="~/Muxbar"
+  ws_root="~/muxbar-sessions"
 fi
 case "$ws_root" in "~"|"~/"*|/*) ;; *) die "--root must be an absolute path or start with ~/ (got: $ws_root)";; esac
+# Session folders must not land inside this source checkout (macOS paths are case-insensitive).
+repo=$(pwd -P | tr '[:upper:]' '[:lower:]')
+ws_abs=$(printf '%s' "${ws_root/#\~/$HOME}" | sed 's#/*$##' | tr '[:upper:]' '[:lower:]')
+case "$ws_abs/" in
+  "$repo/"*)
+    [ -n "$root_arg" ] && die "--root $ws_root is inside the Muxbar source folder; pick another folder."
+    say "Workspace root $ws_root is inside the Muxbar source folder; switching to ~/muxbar-sessions"
+    ws_root="~/muxbar-sessions" ;;
+esac
 printf '# Written by install.sh\nroot=%s\n' "$ws_root" > "$CONF"
 mkdir -p "${ws_root/#\~/$HOME}"
 say "Workspace root: $ws_root"

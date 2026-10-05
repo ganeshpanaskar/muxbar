@@ -4,8 +4,8 @@ import Foundation
 /// Muxbar only ever creates or moves folders it created itself, never deletes contents, and
 /// refuses to overwrite an existing folder.
 public enum Workspace {
-    public static let defaultLocalRoot = "~/Muxbar"
-    public static let defaultRemoteRoot = "~/muxbar"
+    public static let defaultLocalRoot = "~/muxbar-sessions"
+    public static let defaultRemoteRoot = "~/muxbar-sessions"
 
     /// A group/session name as a single safe path component.
     public static func folderName(_ raw: String) -> String {

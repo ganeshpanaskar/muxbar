@@ -104,7 +104,7 @@ public enum MuxbarPaths {
 public let augmentedPATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 public func findLocalTmux() -> String? {
-    for p in ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"]
+    for p in ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/opt/local/bin/tmux", "/usr/bin/tmux"]
     where FileManager.default.isExecutableFile(atPath: p) { return p }
     return nil
 }

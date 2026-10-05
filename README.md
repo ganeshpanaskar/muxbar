@@ -69,8 +69,8 @@ Only `id` and `command` are required. A custom entry with a built-in's `id` over
 
 | | |
 |---|---|
-| Mac | macOS 14.5 or later with Command Line Tools (`xcode-select --install`). No Xcode, Homebrew or Python needed. |
-| Local tmux | Optional but recommended (`brew install tmux`). Without it, local sessions are plain windows that don't survive being closed. |
+| Mac | macOS 14.5 or later with Command Line Tools (`xcode-select --install`). No Xcode or Python needed. [Homebrew](https://brew.sh) is used to install tmux if you don't have it. |
+| Local tmux | Installed for you by `./install.sh` (via Homebrew or MacPorts). Use `--no-tmux` to skip it; local sessions are then plain windows that don't survive being closed. |
 | Remote hosts | Any host reachable through an alias in your `~/.ssh/config`, with tmux ≥ 2.6. |
 | Terminal | None needed. Muxbar has a built-in terminal (SwiftTerm), and Terminal.app or iTerm2 can be chosen in Settings instead. |
 
@@ -81,7 +81,7 @@ git clone https://github.com/ganeshpanaskar/muxbar.git
 cd muxbar && ./install.sh
 ```
 
-The installer asks once for a **workspace root** (default `~/Muxbar`; or pass `--root PATH`).
+The installer asks once for a **workspace root** (default `~/muxbar-sessions`; or pass `--root PATH`).
 It builds the app on your Mac and installs it to `~/Applications/Muxbar.app`, so Gatekeeper
 doesn't block it and no signing account is needed. It then starts in the menu bar.
 
