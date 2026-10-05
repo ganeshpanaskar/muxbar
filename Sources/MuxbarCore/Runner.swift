@@ -70,16 +70,28 @@ public func runProcess(_ path: String, _ args: [String], timeout: TimeInterval,
         p.standardInput = FileHandle.nullDevice
 
         let box = OutputBox()
-        outPipe.fileHandleForReading.readabilityHandler = { h in box.append(h.availableData, err: false) }
-        errPipe.fileHandleForReading.readabilityHandler = { h in box.append(h.availableData, err: true) }
+        // One reader per pipe, each until EOF. Reading in handlers raced with process exit: a
+        // handler could have taken data off the pipe but not stored it yet when the result was
+        // built, so output was occasionally lost.
+        let readers = DispatchGroup()
+        for (pipe, isErr) in [(outPipe, false), (errPipe, true)] {
+            readers.enter()
+            DispatchQueue.global().async {
+                let h = pipe.fileHandleForReading
+                while true {
+                    let d = h.availableData
+                    if d.isEmpty { break }
+                    box.append(d, err: isErr)
+                }
+                readers.leave()
+            }
+        }
 
         let finished = ResumeOnce()
         p.terminationHandler = { proc in
-            // Drain whatever is already buffered without waiting for EOF.
-            outPipe.fileHandleForReading.readabilityHandler = nil
-            errPipe.fileHandleForReading.readabilityHandler = nil
-            box.append(drainNonBlocking(outPipe.fileHandleForReading), err: false)
-            box.append(drainNonBlocking(errPipe.fileHandleForReading), err: true)
+            // EOF normally follows exit at once. A background child that inherited the pipe can
+            // hold it open, so don't wait for it forever; keep what has arrived by then.
+            _ = readers.wait(timeout: .now() + 1)
             let (o, e) = box.strings()
             finished.once {
                 cont.resume(returning: RunResult(stdout: o, stderr: e, exitCode: proc.terminationStatus,
@@ -104,20 +116,6 @@ public func runProcess(_ path: String, _ args: [String], timeout: TimeInterval,
             }
         }
     }
-}
-
-private func drainNonBlocking(_ h: FileHandle) -> Data {
-    let fd = h.fileDescriptor
-    let flags = fcntl(fd, F_GETFL)
-    _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
-    var data = Data()
-    var buf = [UInt8](repeating: 0, count: 65536)
-    while true {
-        let n = read(fd, &buf, buf.count)
-        if n <= 0 { break }
-        data.append(buf, count: n)
-    }
-    return data
 }
 
 private final class OutputBox: @unchecked Sendable {
