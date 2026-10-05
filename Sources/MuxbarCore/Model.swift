@@ -212,6 +212,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
     /// Extra agent CLIs beyond the built-in presets (same id overrides a preset). Lets any tool get
     /// resume-by-id and its own status markers; see `AgentProfile`.
     public var customAgents: [AgentProfile] = []
+    /// Check GitHub for new releases on launch and daily (same-major ones install themselves).
+    public var checkForUpdates: Bool = true
     /// Extra ssh config file (`ssh -F`). nil = the user's normal config.
     public var sshConfigFile: String?
     /// Test/diagnostic switch: behave as if tmux were not installed locally (L1 path).
@@ -221,7 +223,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
 
     public init() {}
 
-    enum CodingKeys: String, CodingKey { case terminal, defaultCommand, customAgents, sshConfigFile, disableLocalTmux, workspaceRoots }
+    enum CodingKeys: String, CodingKey { case terminal, defaultCommand, customAgents, checkForUpdates, sshConfigFile, disableLocalTmux, workspaceRoots }
 
     /// Tolerant decoding: settings written by older versions lack newer keys.
     public init(from decoder: Decoder) throws {
@@ -229,6 +231,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         terminal = (try? c.decodeIfPresent(TerminalKind.self, forKey: .terminal)) ?? .embedded
         defaultCommand = try c.decodeIfPresent(String.self, forKey: .defaultCommand) ?? "claude"
         customAgents = (try? c.decodeIfPresent([AgentProfile].self, forKey: .customAgents)) ?? []
+        checkForUpdates = try c.decodeIfPresent(Bool.self, forKey: .checkForUpdates) ?? true
         sshConfigFile = try c.decodeIfPresent(String.self, forKey: .sshConfigFile)
         disableLocalTmux = try c.decodeIfPresent(Bool.self, forKey: .disableLocalTmux) ?? false
         workspaceRoots = try c.decodeIfPresent([String: String].self, forKey: .workspaceRoots) ?? [:]

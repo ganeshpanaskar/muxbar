@@ -37,6 +37,16 @@ It only touches tmux sessions named `muxbar-e2e-*`.
   `Sources/MuxbarCore/Conversations.swift`. It's a POSIX `sh` script run on the host, plus a
   parser, and both are tested in `CoreTests.swift`.
 
+## Releasing (maintainers)
+
+Installed copies update themselves from GitHub Releases, so a release is what ships to users:
+
+1. Bump `VERSION` in the `Makefile` (semver: patch = fixes, minor = features, **major = breaking**;
+   major releases ask users before installing, the others install automatically).
+2. Commit, then tag and publish: `git tag v0.2.0 && git push origin v0.2.0 &&
+   gh release create v0.2.0 --generate-notes`.
+3. The tag must match `VERSION`, otherwise installs keep seeing themselves as outdated.
+
 ## Guidelines
 
 - Keep `MuxbarCore` free of UI code and unit-test new logic there.

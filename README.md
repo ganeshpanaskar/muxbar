@@ -91,8 +91,19 @@ Then:
 2. Set the **Default command** (e.g. `claude`, `codex`, `gemini`).
 3. Optional: Settings → **Open Muxbar at login**.
 
-**Update:** `git pull && ./install.sh`. **Uninstall:** `./install.sh --uninstall`. It asks
-before deleting your data and never touches tmux sessions.
+**Updates are automatic.** On launch and once a day, Muxbar checks the latest
+[GitHub release](https://github.com/ganeshpanaskar/muxbar/releases):
+- **Minor and patch releases** (e.g. 0.1 → 0.2) install themselves. Muxbar fetches the release
+  tag into your checkout, re-runs `./install.sh` and restarts. Your sessions keep running in tmux.
+- **Major releases** (e.g. 1.x → 2.0) show a popup with the release notes and ask before updating.
+- If your checkout has local changes or isn't on `main` (you're hacking on Muxbar), it never
+  touches it and just tells you an update is available.
+
+Turn this off, or use **Check now**, in Settings → General. To update by hand:
+`git pull && ./install.sh`.
+
+**Uninstall:** `./install.sh --uninstall`. It asks before deleting your data and never touches
+tmux sessions.
 
 ## Using it
 
@@ -131,7 +142,9 @@ $M --cli          # full usage
 
 ## Privacy
 
-- Nothing leaves your Mac except SSH to your own hosts. Muxbar never contacts any AI provider.
+- Nothing leaves your Mac except SSH to your own hosts, plus a daily request to GitHub's public
+  release API to check for updates (can be turned off in Settings). Muxbar never contacts any AI
+  provider.
 - It keeps one shared SSH connection per host (`~/.muxbar/cm/`) with `BatchMode`, so it never
   hangs on a password prompt.
 - State is plain JSON at `~/Library/Application Support/Muxbar/state.json`. Logs are at

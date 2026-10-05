@@ -22,6 +22,7 @@ final class AppModel {
         }
         server?.start()
         installWheelMonitor()
+        Updater.shared.start(store: store)
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil,
                                                queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.server?.stop() }

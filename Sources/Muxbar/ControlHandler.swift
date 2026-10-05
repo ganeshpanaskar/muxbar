@@ -204,6 +204,19 @@ enum ControlHandler {
                 NSGraphicsContext.restoreGraphicsState()
                 try rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: out))
                 return ok(out)
+            case "check-updates":
+                // Test hook: --latest TAG simulates the newest release; --apply acts on it
+                // (auto-update / popup) — without it, only the decision is reported.
+                let sim = str("latest").flatMap { t in SemVer(t).map { ReleaseInfo(tag: t, version: $0, notes: "Simulated release", url: "https://github.com/\(Updates.repo)/releases") } }
+                let apply = a["apply"] as? Bool == true
+                let d = await Updater.shared.check(manual: sim == nil && apply, simulated: sim, apply: apply)
+                let decision: String
+                switch d {
+                case .upToDate: decision = "up-to-date"
+                case .automatic(let r): decision = "automatic \(r.tag)"
+                case .askFirst(let r): decision = "ask-first \(r.tag)"
+                }
+                return ok(["current": Updater.currentVersion.description, "decision": decision, "status": Updater.shared.lastResult])
             case "branding":
                 // Test hook: which Dock icon is active and whether the menu-bar glyph animates.
                 let dark = AppIconController.shared.isDark
@@ -265,7 +278,7 @@ enum ControlHandler {
     }
 
     static func settingsJSON(_ s: AppSettings) -> [String: Any] {
-        ["terminal": s.terminal.rawValue, "defaultCommand": s.defaultCommand,
+        ["terminal": s.terminal.rawValue, "defaultCommand": s.defaultCommand, "checkForUpdates": s.checkForUpdates,
          "agents": s.agents.map { ["id": $0.id, "name": $0.name, "command": $0.command, "resume": $0.resumeTemplate ?? ""] },
          "sshConfigFile": s.sshConfigFile ?? "", "disableLocalTmux": s.disableLocalTmux]
     }
@@ -277,7 +290,7 @@ enum ControlHandler {
 
 /// `Muxbar --cli <command> [--key value ...] [--yes] [--no-attach] [--json]`
 enum CLI {
-    static let flags: Set<String> = ["yes", "no-attach", "json", "no-enter", "dry-run"]
+    static let flags: Set<String> = ["yes", "no-attach", "json", "no-enter", "dry-run", "apply"]
 
     static func run(_ argv: [String]) -> Int32 {
         guard let cmd = argv.first else {
@@ -354,6 +367,7 @@ enum CLI {
       settings | settings-set [--terminal embedded|terminal|iterm] [--ssh-config PATH] [--default-command C]  (empty = plain shell)
       scroll --host H --id ID [--lines N | --to POS] | type … then check atLive
       waiting | next-waiting   (⌘J) | resume-ended --host H --id NAME | restore-state
+      check-updates [--latest TAG] [--apply]   (no --apply = only report the decision)
       embedded | selected | window [--action close] | tabs | polling | simulate-sleep | simulate-wake | info | snapshot --out PNG [--what window] | quit
     ID may be a tmux id ($3), an exact session name, or a record key.
 

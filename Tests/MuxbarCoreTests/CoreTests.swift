@@ -509,3 +509,53 @@ func probeOutput(_ nonce: String, _ body: [String]) -> String {
     let rec = try JSONDecoder().decode(SessionRecord.self, from: Data(old.utf8))
     #expect(rec.conversationID == "abc-12345" && rec.agent == nil)
 }
+
+@Test func updateDecisions() {
+    #expect(SemVer("v1.2.3") == SemVer(1, 2, 3) && SemVer("1.4") == SemVer(1, 4, 0) && SemVer("2.0.0-beta") == SemVer(2, 0, 0))
+    #expect(SemVer("") == nil && SemVer("v1.x") == nil && SemVer("1.2.3.4") == nil)
+    let cur = SemVer(0, 1, 0)
+    func rel(_ t: String) -> ReleaseInfo { ReleaseInfo(tag: t, version: SemVer(t)!, notes: "", url: "") }
+    #expect(Updates.decide(current: cur, latest: nil) == .upToDate)
+    #expect(Updates.decide(current: cur, latest: rel("v0.1.0")) == .upToDate)
+    #expect(Updates.decide(current: SemVer(0, 2, 0), latest: rel("v0.1.9")) == .upToDate)
+    #expect(Updates.decide(current: cur, latest: rel("v0.1.1")) == .automatic(rel("v0.1.1")))
+    #expect(Updates.decide(current: cur, latest: rel("v0.9.0")) == .automatic(rel("v0.9.0")))
+    #expect(Updates.decide(current: cur, latest: rel("v1.0.0")) == .askFirst(rel("v1.0.0")))
+
+    let json = #"{"tag_name":"v1.2.0","draft":false,"prerelease":false,"body":"Notes","html_url":"https://x/r"}"#
+    #expect(Updates.parseRelease(Data(json.utf8)) == ReleaseInfo(tag: "v1.2.0", version: SemVer(1, 2, 0), notes: "Notes", url: "https://x/r"))
+    #expect(Updates.parseRelease(Data(#"{"tag_name":"v2.0.0","prerelease":true}"#.utf8)) == nil)
+    #expect(Updates.parseRelease(Data(#"{"tag_name":"nightly"}"#.utf8)) == nil)
+    #expect(Updates.parseRelease(Data("not json".utf8)) == nil)
+
+    #expect(Updates.isSafeTag("v1.2.3") && Updates.isSafeTag("1.0") && Updates.isSafeTag("v2.0.0-rc.1"))
+    #expect(!Updates.isSafeTag("v1; rm -rf ~") && !Updates.isSafeTag("$(id)") && !Updates.isSafeTag("v1.2 x"))
+    #expect(Updates.sourceDir(conf: "# x\nroot=~/m\nsrc=/Users/u/src/muxbar\n") == "/Users/u/src/muxbar")
+    #expect(Updates.sourceDir(conf: "root=~/m\n") == nil)
+    #expect(Updates.updateScript(sourceDir: "/tmp/it's", tag: "v1.0.0").contains("cd '/tmp/it'\\''s'"))
+}
+
+@Test func updateScriptAgainstRealGit() async throws {
+    // A checkout at v0.1.0 fast-forwards to a local "release" tag; local changes block it.
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("muxbar-upd-\(UUID().uuidString)")
+    let up = root.appendingPathComponent("up").path, co = root.appendingPathComponent("co").path
+    let setup = """
+    set -e
+    git init -q -b main \(up) && cd \(up) && git config user.email t@t && git config user.name t
+    printf '#!/bin/sh\\necho installed > installed.txt\\n' > install.sh && chmod +x install.sh
+    git add . && git commit -qm one && git tag v0.1.0
+    git clone -q \(up) \(co)
+    echo 2 > two && git add two && git commit -qm two && git tag v0.2.0
+    """
+    #expect(await shell("/bin/sh", ["-c", setup]).exitCode == 0)
+    // Point the script at the local "upstream" instead of GitHub.
+    func script(_ dir: String) -> String {
+        Updates.updateScript(sourceDir: dir, tag: "v0.2.0").replacingOccurrences(of: shellQuote(Updates.repoURL), with: shellQuote(up))
+    }
+    try "dirty".write(toFile: co + "/install.sh", atomically: true, encoding: .utf8)
+    #expect(await shell("/bin/bash", ["-c", script(co)]).exitCode == 4)
+    #expect(await shell("/bin/sh", ["-c", "cd \(co) && git checkout -q -- install.sh"]).exitCode == 0)
+    let r = await shell("/bin/bash", ["-c", script(co)])
+    #expect(r.exitCode == 0, "\(r.stderr)")
+    #expect(FileManager.default.fileExists(atPath: co + "/two") && FileManager.default.fileExists(atPath: co + "/installed.txt"))
+}

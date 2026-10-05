@@ -12,8 +12,9 @@ You'll get a reply within a week, and a fix and credit (if you want it) once it'
 
 Of particular interest: shell quoting/injection in commands Muxbar builds (session names,
 folders, conversation ids, agent commands), the local control socket, and anything that could
-leak data off the machine. Muxbar itself never contacts any AI provider or other network service
-besides SSH to your own hosts.
+leak data off the machine. Muxbar itself never contacts any AI provider; its only network use
+is SSH to your own hosts and the GitHub release check for updates, which installs only plain
+version tags from this repository.
 
 ## Supported versions
 

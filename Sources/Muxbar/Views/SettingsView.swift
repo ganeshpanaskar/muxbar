@@ -57,6 +57,14 @@ struct SettingsView: View {
                         m.loginItem = LoginItem.isEnabled
                     }))
                 if let e = m.loginError { Text(e).font(.caption).foregroundStyle(.red) }
+                Toggle("Check for updates automatically", isOn: Binding(
+                    get: { store.settings.checkForUpdates },
+                    set: { on in store.updateSettings { $0.checkForUpdates = on } }))
+                LabeledContent("Version \(Updater.currentVersion.description)") {
+                    Button("Check now") { _ = Task<Void, Never> { await Updater.shared.check(manual: true) } }
+                }
+                Text("Minor updates install themselves (Muxbar restarts; sessions keep running). Major updates ask first. Only GitHub's release API is contacted.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }
         .formStyle(.grouped)

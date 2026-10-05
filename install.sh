@@ -128,7 +128,8 @@ case "$ws_abs/" in
     say "Workspace root $ws_root is inside the Muxbar source folder; switching to ~/muxbar-sessions"
     ws_root="~/muxbar-sessions" ;;
 esac
-printf '# Written by install.sh\nroot=%s\n' "$ws_root" > "$CONF"
+# src= lets the app update itself from this checkout (git fetch of a release tag + install.sh).
+printf '# Written by install.sh\nroot=%s\nsrc=%s\n' "$ws_root" "$(pwd -P)" > "$CONF"
 mkdir -p "${ws_root/#\~/$HOME}"
 say "Workspace root: $ws_root"
 
