@@ -2,6 +2,17 @@
 
 Thanks for helping! Bug reports, agent support and fixes are all welcome.
 
+## How to contribute
+
+1. Look for issues labelled [`good first issue`](https://github.com/ganeshpanaskar/muxbar/labels/good%20first%20issue)
+   or [`help wanted`](https://github.com/ganeshpanaskar/muxbar/labels/help%20wanted), or open one
+   to discuss a bigger change first. Questions go to [Discussions](https://github.com/ganeshpanaskar/muxbar/discussions).
+2. Fork the repo, create a branch (`git checkout -b add-aider-preset`), make your change.
+3. Run `make test`, then open a pull request against `main`. CI must pass before merging.
+
+By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md). Report security issues
+privately, see [SECURITY.md](SECURITY.md).
+
 ## Build and test
 
 Muxbar builds with Apple's Command Line Tools alone (no Xcode):

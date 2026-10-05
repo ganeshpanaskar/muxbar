@@ -1,0 +1,41 @@
+name: Agent support request
+description: Ask for (or offer to add) support for another agent CLI
+labels: [agent-support]
+body:
+  - type: input
+    id: name
+    attributes:
+      label: Agent CLI
+      placeholder: "e.g. aider, grok, opencode"
+    validations:
+      required: true
+  - type: input
+    id: link
+    attributes:
+      label: Project link
+  - type: textarea
+    id: commands
+    attributes:
+      label: Commands
+      description: How to start it, resume a conversation by id, and continue the latest one.
+      placeholder: |
+        start:    aider
+        resume:   aider --restore-chat-history
+        continue: ...
+  - type: textarea
+    id: screens
+    attributes:
+      label: Screens
+      description: Paste `tmux capture-pane -p -J` output while it is working, waiting for approval, and idle.
+      render: text
+  - type: input
+    id: transcripts
+    attributes:
+      label: Where does it store conversations?
+      placeholder: "e.g. ~/.aider/history/*.md"
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Contributing
+      options:
+        - label: I'd like to open the pull request myself

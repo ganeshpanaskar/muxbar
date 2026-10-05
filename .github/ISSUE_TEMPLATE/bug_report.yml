@@ -1,0 +1,48 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "e.g. 15.3"
+    validations:
+      required: true
+  - type: input
+    id: agent
+    attributes:
+      label: Agent and version
+      description: The CLI running in the session, if relevant.
+      placeholder: "e.g. claude 2.1.288, codex 0.45, gemini 0.20, plain shell"
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where does the session run?
+      options: [This Mac (tmux), This Mac (no tmux), Remote SSH host]
+  - type: dropdown
+    id: terminal
+    attributes:
+      label: Terminal mode
+      options: [Built-in, Terminal.app, iTerm2]
+  - type: textarea
+    id: status
+    attributes:
+      label: Wrong status? Paste the pane
+      description: |
+        For a wrong Working/Waiting/Idle dot, paste `tmux capture-pane -p -J -t <session>` output.
+        Remove any hostnames, usernames or private text first.
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant lines from `~/Library/Logs/Muxbar/app.log` (scrub private details).
+      render: text
