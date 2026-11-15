@@ -24,12 +24,12 @@ func loadStatusFixtures() -> [StatusFixture] {
         let base = url.deletingPathExtension().lastPathComponent
         let prefix = String(base.split(separator: "-").first ?? "")
         let expected: SessionStatus? = ["working": .working, "waiting": .waiting, "idle": .idle,
-                                        "notclaude": .notAgent, "unknown": .unknown][prefix]
+                                        "notclaude": .notClaude, "unknown": .unknown][prefix]
         guard let expected, let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         let procURL = url.deletingPathExtension().appendingPathExtension("procs")
         let procs = (try? String(contentsOf: procURL, encoding: .utf8))
             .map { $0.split(separator: "\n").map(String.init) }
-            ?? (expected == .notAgent ? ["zsh"] : ["zsh", "claude"])
+            ?? (expected == .notClaude ? ["zsh"] : ["zsh", "claude"])
         let age = (try? String(contentsOf: url.deletingPathExtension().appendingPathExtension("age"), encoding: .utf8))
             .flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
         let lines = HostProbe.lastNonBlank(text.components(separatedBy: "\n"), count: 60)
@@ -40,7 +40,7 @@ func loadStatusFixtures() -> [StatusFixture] {
 @Test func fixturesExist() {
     let f = loadStatusFixtures()
     #expect(f.count >= 6)
-    for s in [SessionStatus.working, .waiting, .idle, .notAgent] {
+    for s in [SessionStatus.working, .waiting, .idle, .notClaude] {
         #expect(f.contains { $0.expected == s }, "missing fixture for \(s)")
     }
 }
@@ -51,12 +51,12 @@ func classifiesFixture(_ f: StatusFixture) {
 }
 
 @Test func processNames() {
-    #expect(StatusClassifier.isAgentProcess("claude"))
-    #expect(StatusClassifier.isAgentProcess("/Users/u/.local/share/claude/versions/2.1.288/bin/claude"))
-    #expect(StatusClassifier.isAgentProcess("2.1.3"))
-    #expect(!StatusClassifier.isAgentProcess("zsh"))
-    #expect(!StatusClassifier.isAgentProcess("zsh (shell-wrapper)"))
-    #expect(!StatusClassifier.isAgentProcess("claude-helper-not"))
+    #expect(StatusClassifier.isClaudeProcess("claude"))
+    #expect(StatusClassifier.isClaudeProcess("/Users/u/.local/share/claude/versions/2.1.288/bin/claude"))
+    #expect(StatusClassifier.isClaudeProcess("2.1.3"))
+    #expect(!StatusClassifier.isClaudeProcess("zsh"))
+    #expect(!StatusClassifier.isClaudeProcess("zsh (shell-wrapper)"))
+    #expect(!StatusClassifier.isClaudeProcess("claude-helper-not"))
 }
 
 @Test func degradesToUnknownNotWrong() {
@@ -64,7 +64,7 @@ func classifiesFixture(_ f: StatusFixture) {
     #expect(StatusClassifier.classify(processes: ["claude"], lines: ["random output", "more"]) == .unknown)
     #expect(StatusClassifier.classify(processes: nil, lines: nil) == .unknown)
     // node alone, no Claude screen → not Claude; node + Claude screen → classified.
-    #expect(StatusClassifier.classify(processes: ["node"], lines: ["server listening"]) == .notAgent)
+    #expect(StatusClassifier.classify(processes: ["node"], lines: ["server listening"]) == .notClaude)
 }
 
 @Test func legacyEscToInterrupt() {
@@ -81,35 +81,4 @@ func classifiesFixture(_ f: StatusFixture) {
     let fresh = ["▐▛███▛█   Claude Code v2.1.288", "────", "❯ ", "────", "  ⏵⏵ auto mode on"]
     #expect(StatusClassifier.classify(processes: ["claude"], lines: fresh, outputAge: 0) == .unknown)
     #expect(StatusClassifier.classify(processes: ["claude"], lines: fresh, outputAge: 9) == .idle)
-}
-
-@Test func agentProcessesAndCommands() {
-    #expect(AgentProfile.matching(process: "codex")?.id == "codex")
-    #expect(AgentProfile.matching(process: "/opt/homebrew/bin/gemini")?.id == "gemini")
-    #expect(AgentProfile.matching(process: "grok") == nil)
-    #expect(AgentProfile.matching(command: "env FOO=1 /usr/local/bin/codex --full-auto")?.id == "codex")
-    #expect(AgentProfile.matching(command: "") == nil)
-    // A default command that isn't a preset becomes an agent of its own.
-    var s = AppSettings(); s.defaultCommand = "grok --model x"
-    #expect(s.defaultAgent?.id == "grok" && s.defaultAgent?.resumeTemplate == nil)
-    #expect(StatusClassifier.isAgentProcess("grok", agents: s.agents))
-    s.defaultCommand = ""
-    #expect(s.defaultAgent == nil && s.agents.count == AgentProfile.builtins.count)
-}
-
-@Test func classifiesOtherAgentsScreens() {
-    // Codex approval prompt and busy line.
-    #expect(StatusClassifier.classify(processes: ["codex"],
-                                      lines: ["Would you like to run the following command?", "› 1. Yes, proceed"]) == .waiting)
-    #expect(StatusClassifier.classify(processes: ["codex"],
-                                      lines: ["• Working (4s • esc to interrupt)", "› ", "  ? for shortcuts"]) == .working)
-    // Gemini runs as node: recognised from its screen.
-    let gem = ["⠏ Reticulating splines (esc to cancel, 7s)", "╭──────────╮", "│ > Type your message │", "╰──────────╯"]
-    #expect(StatusClassifier.classify(processes: ["zsh", "node"], lines: gem) == .working)
-    #expect(StatusClassifier.classify(processes: ["zsh", "node"], lines: Array(gem.dropFirst()), outputAge: 30) == .idle)
-    // A user-added agent's own markers.
-    let grok = AgentProfile(id: "grok", name: "Grok", command: "grok", waitingMarkers: ["Approve tool call?"])
-    #expect(StatusClassifier.classify(processes: ["grok"], lines: ["Approve tool call?"],
-                                      agents: AgentProfile.builtins + [grok]) == .waiting)
-    #expect(StatusClassifier.classify(processes: ["grok"], lines: ["Approve tool call?"]) == .notAgent)
 }

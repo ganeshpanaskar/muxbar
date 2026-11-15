@@ -22,7 +22,7 @@ enum Snapshot {
         try png.write(to: URL(fileURLWithPath: path))
     }
 
-    /// Captures the open popover window (it's a separate NSPanel-like window).
+    /// Captures an open popover window (it's a separate NSPanel-like window).
     static func renderPopover(to path: String) throws {
         guard let w = NSApp.windows.first(where: { $0.className.contains("Popover") && $0.isVisible }),
               let view = w.contentView?.superview ?? w.contentView else { throw StoreError("popover not open") }

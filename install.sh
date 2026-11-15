@@ -3,7 +3,7 @@
 #   ./install.sh               build + install (also the update path: git pull && ./install.sh)
 #   ./install.sh --uninstall   remove the app (asks before deleting your data)
 #   ./install.sh --reset-permissions   also clear Muxbar's Automation grant so macOS asks again
-#   ./install.sh --root PATH   root folder for session workspaces (default ~/muxbar-sessions; asked on first install)
+#   ./install.sh --root PATH   root folder for session workspaces (otherwise Muxbar asks on first launch)
 #   ./install.sh --no-tmux     don't install tmux (local sessions then won't survive being closed)
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -104,34 +104,25 @@ updating=false
 [ -d "$APP" ] && updating=true
 
 # Workspace root: sessions get <root>/<group>/<session> folders on this Mac (remote hosts have
-# their own root, set in Muxbar → Settings). Asked once; kept on updates unless --root is given.
+# their own root). Muxbar asks for it in its setup window on first launch; --root PATH sets it here
+# instead, and an earlier --root is kept on updates.
 CONF="$HOME/.muxbar/install.conf"
 mkdir -p "$HOME/.muxbar"
 current_root=$( { sed -n "s/^root=//p" "$CONF" 2>/dev/null || true; } | head -1)
-if [ -n "$root_arg" ]; then
-  ws_root="$root_arg"
-elif [ -n "$current_root" ]; then
-  ws_root="$current_root"
-elif [ -t 0 ]; then
-  read -r -p "Root folder for session workspaces [~/muxbar-sessions]: " ws_root || true
-  ws_root="${ws_root:-~/muxbar-sessions}"
-else
-  ws_root="~/muxbar-sessions"
+ws_root="${root_arg:-$current_root}"
+if [ -n "$ws_root" ]; then
+  case "$ws_root" in "~"|"~/"*|/*) ;; *) die "--root must be an absolute path or start with ~/ (got: $ws_root)";; esac
+  # Session folders inside this source checkout would show up as untracked files in it.
+  ws_abs=$(printf '%s' "${ws_root/#\~/$HOME}" | sed 's#/*$##' | tr '[:upper:]' '[:lower:]')
+  src_abs=$(pwd -P | tr '[:upper:]' '[:lower:]')
+  case "$ws_abs/" in
+    "$src_abs"/*) die "--root $ws_root is inside the Muxbar source folder; pick another folder." ;;
+  esac
+  mkdir -p "${ws_root/#\~/$HOME}"
+  say "Workspace root: $ws_root"
 fi
-case "$ws_root" in "~"|"~/"*|/*) ;; *) die "--root must be an absolute path or start with ~/ (got: $ws_root)";; esac
-# Session folders must not land inside this source checkout (macOS paths are case-insensitive).
-repo=$(pwd -P | tr '[:upper:]' '[:lower:]')
-ws_abs=$(printf '%s' "${ws_root/#\~/$HOME}" | sed 's#/*$##' | tr '[:upper:]' '[:lower:]')
-case "$ws_abs/" in
-  "$repo/"*)
-    [ -n "$root_arg" ] && die "--root $ws_root is inside the Muxbar source folder; pick another folder."
-    say "Workspace root $ws_root is inside the Muxbar source folder; switching to ~/muxbar-sessions"
-    ws_root="~/muxbar-sessions" ;;
-esac
 # src= lets the app update itself from this checkout (git fetch of a release tag + install.sh).
-printf '# Written by install.sh\nroot=%s\nsrc=%s\n' "$ws_root" "$(pwd -P)" > "$CONF"
-mkdir -p "${ws_root/#\~/$HOME}"
-say "Workspace root: $ws_root"
+{ echo "# Written by install.sh"; [ -n "$ws_root" ] && echo "root=$ws_root"; echo "src=$(pwd -P)"; } > "$CONF"
 
 say "Building Muxbar (first build takes a minute or two)"
 make install
@@ -148,12 +139,12 @@ say "Muxbar is installed at $APP and running in your menu bar."
 cat <<'MSG'
 
 Next steps:
-  • Click the Muxbar icon in the menu bar → gear → tick any remote hosts (from ~/.ssh/config).
+  • The first time Muxbar opens, its setup window asks for the root folder for session folders
+    and your remote hosts (an ssh alias from ~/.ssh/config, or user@host). Later: Settings → Remote hosts.
   • The first time Muxbar opens a terminal, macOS asks to let it control Terminal (or iTerm2). Click OK.
   • Optional: Settings → "Open Muxbar at login".
-  • Default command for new sessions is `claude` — change it in Settings (codex, gemini, any CLI, or empty for a shell).
   • Remote hosts need tmux 2.6+ (e.g. sudo apt install tmux / sudo dnf install tmux).
 
-Update later with:   git pull && ./install.sh
+Muxbar updates itself from GitHub releases (Settings → General). By hand:  git pull && ./install.sh
 Uninstall with:      ./install.sh --uninstall
 MSG

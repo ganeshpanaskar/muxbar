@@ -18,7 +18,29 @@ public struct RunResult: Sendable, Equatable {
 
 /// Runs a POSIX `sh` script on a host: locally via /bin/sh, remotely via /usr/bin/ssh.
 public protocol ScriptRunner: Sendable {
-    func run(host: String, script: String, timeout: TimeInterval) async -> RunResult
+    func run(host: String, script: String, timeout: TimeInterval, stdin: Data?) async -> RunResult
+}
+
+extension ScriptRunner {
+    public func run(host: String, script: String, timeout: TimeInterval) async -> RunResult {
+        await run(host: host, script: script, timeout: timeout, stdin: nil)
+    }
+}
+
+/// Foundation's Process passes arguments in decomposed Unicode (NFD): "É" arrives as "E" + U+0301,
+/// which is a different file name on Linux and matches nothing in NFC text. Scripts with
+/// non-ASCII characters therefore travel base64-encoded and are decoded on the host; `eval` keeps
+/// the script's stdin free (uploads read it).
+public func asciiSafeScript(_ script: String) -> String {
+    guard script.unicodeScalars.contains(where: { $0.value > 0x7F }) else { return script }
+    let b64 = Data(script.utf8).base64EncodedString()
+    return "eval \"$(printf '%s' '\(b64)' | base64 -d)\""
+}
+
+/// Runs a script with /bin/sh on this Mac (non-ASCII-safe).
+public func runLocalScript(_ script: String, timeout: TimeInterval, environment: [String: String]? = nil,
+                           stdin: Data? = nil) async -> RunResult {
+    await runProcess("/bin/sh", ["-c", asciiSafeScript(script)], timeout: timeout, environment: environment, stdin: stdin)
 }
 
 public struct SystemRunner: ScriptRunner {
@@ -40,23 +62,24 @@ public struct SystemRunner: ScriptRunner {
                  "-o", "ControlPersist=10m",
                  "-T", "--", host,
                  // The remote login shell may be zsh/bash; run our script under sh explicitly.
-                 "sh -c " + shellQuote(script)]
+                 "sh -c " + shellQuote(asciiSafeScript(script))]
         return args
     }
 
-    public func run(host: String, script: String, timeout: TimeInterval) async -> RunResult {
+    public func run(host: String, script: String, timeout: TimeInterval, stdin: Data?) async -> RunResult {
         if host == localHost {
-            return await runProcess("/bin/sh", ["-c", script], timeout: timeout)
+            return await runLocalScript(script, timeout: timeout, stdin: stdin)
         }
-        return await runProcess("/usr/bin/ssh", sshArguments(host: host, script: script), timeout: timeout)
+        return await runProcess("/usr/bin/ssh", sshArguments(host: host, script: script), timeout: timeout, stdin: stdin)
     }
 }
 
 /// Runs a process with a hard timeout. Output is collected incrementally and the result is
 /// returned when the process *exits* — not at pipe EOF, because a ControlPersist master forked
 /// by ssh can keep the stderr pipe open indefinitely.
+/// - Parameter stdin: bytes fed to the process (e.g. a file being uploaded); nil = /dev/null.
 public func runProcess(_ path: String, _ args: [String], timeout: TimeInterval,
-                       environment: [String: String]? = nil) async -> RunResult {
+                       environment: [String: String]? = nil, stdin: Data? = nil) async -> RunResult {
     await withCheckedContinuation { (cont: CheckedContinuation<RunResult, Never>) in
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
@@ -67,32 +90,24 @@ public func runProcess(_ path: String, _ args: [String], timeout: TimeInterval,
         let outPipe = Pipe(), errPipe = Pipe()
         p.standardOutput = outPipe
         p.standardError = errPipe
-        p.standardInput = FileHandle.nullDevice
+        let inPipe = stdin.map { _ in Pipe() }
+        p.standardInput = inPipe ?? FileHandle.nullDevice
 
         let box = OutputBox()
-        // One reader per pipe, each until EOF. Reading in handlers raced with process exit: a
-        // handler could have taken data off the pipe but not stored it yet when the result was
-        // built, so output was occasionally lost.
-        let readers = DispatchGroup()
-        for (pipe, isErr) in [(outPipe, false), (errPipe, true)] {
-            readers.enter()
-            DispatchQueue.global().async {
-                let h = pipe.fileHandleForReading
-                while true {
-                    let d = h.availableData
-                    if d.isEmpty { break }
-                    box.append(d, err: isErr)
-                }
-                readers.leave()
-            }
-        }
+        // Raw read(2) instead of FileHandle.availableData: availableData raises an Objective-C
+        // exception (abort) when the fd is non-blocking and empty, which happens when the drain
+        // below races a still-running readability callback.
+        let outFD = outPipe.fileHandleForReading.fileDescriptor
+        let errFD = errPipe.fileHandleForReading.fileDescriptor
+        outPipe.fileHandleForReading.readabilityHandler = { _ in box.read(outFD, err: false) }
+        errPipe.fileHandleForReading.readabilityHandler = { _ in box.read(errFD, err: true) }
 
         let finished = ResumeOnce()
         p.terminationHandler = { proc in
-            // EOF normally follows exit at once. A background child that inherited the pipe can
-            // hold it open, so don't wait for it forever; keep what has arrived by then.
-            _ = readers.wait(timeout: .now() + 1)
-            let (o, e) = box.strings()
+            // Drain whatever is already buffered without waiting for EOF.
+            outPipe.fileHandleForReading.readabilityHandler = nil
+            errPipe.fileHandleForReading.readabilityHandler = nil
+            let (o, e) = box.drainAndSnapshot(outPipe.fileHandleForReading, errPipe.fileHandleForReading)
             finished.once {
                 cont.resume(returning: RunResult(stdout: o, stderr: e, exitCode: proc.terminationStatus,
                                                  timedOut: box.timedOut))
@@ -107,6 +122,14 @@ public func runProcess(_ path: String, _ args: [String], timeout: TimeInterval,
             }
             return
         }
+        if let inPipe, let stdin {
+            // Written from a background queue: a large upload must not block the caller.
+            DispatchQueue.global().async {
+                let h = inPipe.fileHandleForWriting
+                try? h.write(contentsOf: stdin)
+                try? h.close()
+            }
+        }
         DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
             guard p.isRunning else { return }
             box.markTimedOut()
@@ -118,22 +141,48 @@ public func runProcess(_ path: String, _ args: [String], timeout: TimeInterval,
     }
 }
 
+/// One read(2) of whatever is available; empty on EAGAIN/EOF/error (never throws).
+private func readAvailable(_ fd: Int32) -> Data {
+    var buf = [UInt8](repeating: 0, count: 65536)
+    let n = read(fd, &buf, buf.count)
+    return n > 0 ? Data(buf[0..<n]) : Data()
+}
+
+private func drainNonBlocking(_ h: FileHandle) -> Data {
+    let fd = h.fileDescriptor
+    let flags = fcntl(fd, F_GETFL)
+    _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+    var data = Data()
+    var buf = [UInt8](repeating: 0, count: 65536)
+    while true {
+        let n = read(fd, &buf, buf.count)
+        if n <= 0 { break }
+        data.append(buf, count: n)
+    }
+    return data
+}
+
 private final class OutputBox: @unchecked Sendable {
     private let lock = NSLock()
     private var out = Data()
     private var err = Data()
     private(set) var timedOut = false
 
-    func append(_ d: Data, err isErr: Bool) {
-        guard !d.isEmpty else { return }
+    /// A read and its append happen under the lock: otherwise the final drain can run between a
+    /// callback's read and its append, and the snapshot misses that output.
+    func read(_ fd: Int32, err isErr: Bool) {
         lock.lock(); defer { lock.unlock() }
+        let d = readAvailable(fd)
         if isErr { err.append(d) } else { out.append(d) }
     }
 
     func markTimedOut() { lock.lock(); timedOut = true; lock.unlock() }
 
-    func strings() -> (String, String) {
+    /// Whatever is already buffered (without waiting for EOF), then everything read so far.
+    func drainAndSnapshot(_ o: FileHandle, _ e: FileHandle) -> (String, String) {
         lock.lock(); defer { lock.unlock() }
+        out.append(drainNonBlocking(o))
+        err.append(drainNonBlocking(e))
         return (String(decoding: out, as: UTF8.self), String(decoding: err, as: UTF8.self))
     }
 }

@@ -12,10 +12,8 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 HOST=${HOST:-local}
-# Second host for cross-host tests (an ssh alias with tmux 2.6+); those tests skip if unreachable.
-REMOTE=${REMOTE:-devbox}
 TERMINAL=${TERMINAL:-embedded}
-M="$HOME/Applications/Muxbar.app/Contents/MacOS/Muxbar"
+. scripts/e2e-env.sh
 OUT="e2e-artifacts/$HOST-$TERMINAL"
 RES="$OUT/results.tsv"
 DIR=/tmp/muxbar-e2e-dir
@@ -23,13 +21,15 @@ mkdir -p "$OUT"
 
 mb() { perl -e 'alarm 90; exec @ARGV' "$M" --cli "$@"; }
 
-# Run a shell script on the host directly (test setup/verification, outside Muxbar).
+# Run a shell script on the host directly (test setup/verification, outside Muxbar). Its tmux
+# calls go to the same tmux server as the app's (see scripts/e2e-env.sh).
 rsh() {
   if [ "$HOST" = local ]; then
-    PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" sh -c "$1"
+    PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" sh -c "$TMUX_FN
+$1"
   else
-    printf '%s\n' "$1" | ssh -o BatchMode=yes -o ConnectTimeout=15 -o ControlMaster=auto \
-      -o "ControlPath=$HOME/.muxbar/cm/%C" -o ControlPersist=10m -T "$HOST" sh -s 2>/dev/null
+    printf '%s\n%s\n' "$TMUX_FN" "$1" | ssh -o BatchMode=yes -o ConnectTimeout=15 -o ControlMaster=auto \
+      -o "ControlPath=$CM_DIR/%C" -o ControlPersist=10m -T "$HOST" sh -s 2>/dev/null
   fi
 }
 
@@ -101,16 +101,17 @@ simulate_vpn_drop() {
   # "ssh -t HOST tmux attach-session -t '$N'", local ones "tmux attach-session -t $N" (unquoted).
   for id in $(rsh 'tmux list-sessions -F "#{session_id} #{session_name}" 2>/dev/null' | awk '$2 ~ /^muxbar-e2e-/ {print $1}'); do
     if [ "$HOST" = local ]; then
-      pat="tmux attach-session -t \\\$${id#\$}\$"
+      pat="tmux ${ATTACH_L_LOCAL}attach-session -t \\\$${id#\$}\$"
     else
-      pat="ssh .*-t $HOST tmux attach-session -t '\\\$${id#\$}'\$"
+      pat="ssh .*-t $HOST tmux ${ATTACH_L_REMOTE}attach-session -t '\\\$${id#\$}'\$"
     fi
     # SIGKILL: an ssh -t in a pty can survive SIGTERM, and a real network loss doesn't ask nicely.
     pkill -9 -f "$pat" 2>/dev/null
     for _ in 1 2 3 4 5; do pgrep -f "$pat" >/dev/null || break; sleep 0.5; done
   done
-  for s in "$HOME"/.muxbar/cm/*; do [ -S "$s" ] && ssh -O exit -o "ControlPath=$s" "$HOST" 2>/dev/null; done
-  pkill -f "ControlPath=$HOME/.muxbar/cm" 2>/dev/null
+  # Only the driven app's own ssh connections (the test instance's cm dir), never anyone else's.
+  for s in "$CM_DIR"/*; do [ -S "$s" ] && ssh -O exit -o "ControlPath=$s" "$HOST" 2>/dev/null; done
+  pkill -f "ControlPath=$CM_DIR" 2>/dev/null
   sleep 2
 }
 
@@ -261,7 +262,7 @@ import json,sys; t=json.load(sys.stdin)["result"].get("tab",{}); print(t.get("wi
     local x; x=$(rsh "tmux list-sessions -F '#{session_name} #{session_attached}'" | grep -E '^muxbar-e2e-p[12] ' | tr '\n' ';')
     echo "$x" | grep -q "muxbar-e2e-p1 1" && echo "$x" | grep -q "muxbar-e2e-p2 1"
   }
-  wait_for 25 both_attached   # remote attach over ssh can take several seconds
+  wait_for 25 both_attached   # remote attach can take several seconds through a proxy
   local a; a=$(rsh "tmux list-sessions -F '#{session_name} #{session_attached}'" | grep -E '^muxbar-e2e-p[12] ' | tr '\n' ';')
   echo "p1=$f1 p2=$f2 p2WindowClosed=$gone attached=$a" > "$OUT/E7.txt"
   # Terminal.app after a hard drop still shows the dead tmux screen; Muxbar won't type into a
@@ -355,22 +356,22 @@ E11() {
 E12() {
   local h; h=$(mb hosts | grep "host=$HOST ")
   if echo "$h" | grep -q "Auth expired"; then pass E12 "live: $h"
-  else skip E12 "SSH auth did not expire during run; covered by unit test sshErrors() with captured ssh text"; fi
+  else skip E12 "credentials did not expire during run; covered by unit test sshErrors() with captured ssh text"; fi
 }
 
 E13() {
-  local sf="$HOME/Library/Application Support/Muxbar/state.json"
+  local sf="$STATE_FILE"
   cp "$sf" "$OUT/state-backup.json"
-  mb quit >/dev/null; sleep 2
+  app_quit
   printf '{ this is not json' > "$sf"
-  open "$HOME/Applications/Muxbar.app"; wait_for 15 sh -c "\"$M\" --cli info >/dev/null 2>&1"
+  app_start
   local info; info=$(mb info)
   local bad; bad=$(ls "$sf".bad-* 2>/dev/null | tail -1)
   echo "$info" > "$OUT/E13-info.txt"
-  # Restore the real state.
-  mb quit >/dev/null; sleep 2
+  # Restore the saved state.
+  app_quit
   cp "$OUT/state-backup.json" "$sf"; rm -f "$bad"
-  open "$HOME/Applications/Muxbar.app"; wait_for 15 sh -c "\"$M\" --cli info >/dev/null 2>&1"
+  app_start
   if echo "$info" | grep -q "banner=Muxbar's saved state was unreadable" && [ -n "$bad" ]; then
     pass E13 "corrupt file moved aside ($(basename "$bad")), warning shown, app ran; state restored"
   else fail E13 "info=$info bad=$bad"; fi
@@ -453,7 +454,7 @@ E20() {
   # Groups live under one host: create on $HOST, move sessions in (incl. one created with --group),
   # reject a session from another host, rename, delete (sessions stay running under the host).
   [ "$TERMINAL" = embedded ] || { skip E20 "built-in terminal only"; return; }
-  local other=local; [ "$HOST" = local ] && other=$REMOTE
+  local other=local; [ "$HOST" = local ] && other=devbox
   mb group-delete --host "$HOST" --name e2e-grp >/dev/null 2>&1; mb group-delete --host "$HOST" --name e2e-grp2 >/dev/null 2>&1
   # Groups hold Muxbar sessions (outside ones stay in Others), so create them through Muxbar.
   mb new --host "$HOST" --name muxbar-e2e-g1 --dir /tmp --cmd 'sleep 600' --no-attach >/dev/null
@@ -478,7 +479,7 @@ for g in json.load(sys.stdin)['result']:
   local g; g=$(grp_members e2e-grp)
   local onhost; onhost=$(mb groups --json | python3 -c "
 import json,sys; print(sorted({g['host'] for g in json.load(sys.stdin)['result'] if g['group']=='e2e-grp'}))")
-  local persisted; persisted=$(grep -c '"group" : "e2e-grp"' "$HOME/Library/Application Support/Muxbar/state.json")
+  local persisted; persisted=$(grep -c '"group" : "e2e-grp"' "$STATE_FILE")
   local ui; ui=$(wsnap E20-tree)
   mb group-rename --host "$HOST" --name e2e-grp --to e2e-grp2 >/dev/null
   local g2; g2=$(grp_members e2e-grp2)
@@ -599,7 +600,7 @@ E23() {
 
 E25() {
   # Needs-input across hosts and groups: pinned section (oldest first), group waiting badge, ⌘J cycling.
-  [ "$HOST" = local ] && [ "$TERMINAL" = embedded ] || { skip E25 "local run (uses $REMOTE too), built-in terminal"; return; }
+  [ "$HOST" = local ] && [ "$TERMINAL" = embedded ] || { skip E25 "local run (uses devbox too), built-in terminal"; return; }
   mkdir -p /tmp/muxbar-e2e-bin
   [ -x /tmp/muxbar-e2e-bin/claude ] || printf '#include <unistd.h>\nint main(void){sleep(300);return 0;}\n' | cc -x c - -o /tmp/muxbar-e2e-bin/claude
   local prompt="printf 'Bash command\\n Do you want to proceed?\\n ❯ 1. Yes\\n'"
@@ -610,8 +611,8 @@ E25() {
   wait_for 20 wait_one local muxbar-e2e-w1
   sleep 2
   local remote=no
-  if HOST=$REMOTE rsh "mkdir -p /tmp/muxbar-e2e-bin && cp /bin/sleep /tmp/muxbar-e2e-bin/claude && tmux new-session -d -s muxbar-e2e-w3 \"$prompt; exec /tmp/muxbar-e2e-bin/claude 300\""; then
-    wait_for 30 wait_one $REMOTE muxbar-e2e-w3 && remote=yes
+  if HOST=devbox rsh "mkdir -p /tmp/muxbar-e2e-bin && cp /bin/sleep /tmp/muxbar-e2e-bin/claude && tmux new-session -d -s muxbar-e2e-w3 \"$prompt; exec /tmp/muxbar-e2e-bin/claude 300\""; then
+    wait_for 30 wait_one devbox muxbar-e2e-w3 && remote=yes
   fi
   sleep 2
   mb new --host local --name muxbar-e2e-w2 --dir /tmp --cmd "$prompt; exec /tmp/muxbar-e2e-bin/claude 300" --no-attach >/dev/null
@@ -630,7 +631,7 @@ E25() {
   # Only our sessions count for the comparison (the user may have real waiting sessions too).
   local ours; ours=$(echo $jumps | tr ' ' '\n' | grep '^muxbar-e2e-w' | tr '\n' ' ' | sed 's/ $//')
   for n in w1 w2; do local id; id=$(idof muxbar-e2e-$n); [ -n "$id" ] && mb kill --host local --id "$id" --yes >/dev/null; done
-  [ $remote = yes ] && { local rid; rid=$(mb list --host $REMOTE | awk -F'\t' '$4=="muxbar-e2e-w3"{print $2}'); mb kill --host $REMOTE --id "$rid" --yes >/dev/null; }
+  [ $remote = yes ] && { local rid; rid=$(mb list --host devbox | awk -F'\t' '$4=="muxbar-e2e-w3"{print $2}'); mb kill --host devbox --id "$rid" --yes >/dev/null; }
   mb group-delete --host local --name e2e-attn >/dev/null
   local first3; first3=$(echo "$ours" | cut -d' ' -f1-3)
   local okcycle=no
@@ -704,23 +705,22 @@ E27() {
 
 E28() {
   # App restart: the panes that were open come back (local + remote host) and the selection is kept.
-  [ "$HOST" = local ] && [ "$TERMINAL" = embedded ] || { skip E28 "local run (uses $REMOTE too), built-in terminal"; return; }
+  [ "$HOST" = local ] && [ "$TERMINAL" = embedded ] || { skip E28 "local run (uses devbox too), built-in terminal"; return; }
   mb new --host local --name muxbar-e2e-rl --dir /tmp --cmd 'sleep 900' >/dev/null
   local remote=no
-  mb new --host $REMOTE --name muxbar-e2e-rr --dir /tmp --cmd 'sleep 900' >/dev/null 2>&1 && remote=yes
+  mb new --host devbox --name muxbar-e2e-rr --dir /tmp --cmd 'sleep 900' >/dev/null 2>&1 && remote=yes
   mb focus --host local --id muxbar-e2e-rl >/dev/null
   sleep 2
   local before; before=$(mb restore-state)
-  mb quit >/dev/null; sleep 3
-  open "$HOME/Applications/Muxbar.app"
-  wait_for 20 sh -c "\"$M\" --cli info >/dev/null 2>&1"
+  app_quit; sleep 1
+  app_start
   back() { mb embedded | grep -F "name=muxbar-e2e-rl " | grep -q state=running && { [ $remote = no ] || mb embedded | grep -F "name=muxbar-e2e-rr " | grep -q state=running; }; }
   local ok=no; wait_for 60 back && ok=yes
   local sel; sel=$(mb selected)
   local ui; ui=$(wsnap E28-restored)
-  for h in local $REMOTE; do for n in rl rr; do local id; id=$(mb list --host $h | awk -F'\t' -v n=muxbar-e2e-$n '$4==n{print $2}'); [ -n "$id" ] && mb kill --host $h --id "$id" --yes >/dev/null; done; done
+  for h in local devbox; do for n in rl rr; do local id; id=$(mb list --host $h | awk -F'\t' -v n=muxbar-e2e-$n '$4==n{print $2}'); [ -n "$id" ] && mb kill --host $h --id "$id" --yes >/dev/null; done; done
   if [ $ok = yes ] && [ "$sel" = muxbar-e2e-rl ]; then
-    pass E28 "after quit+relaunch: panes running again (local$( [ $remote = yes ] && echo " + $REMOTE")), selection kept ($sel); saved: $before; ui=$ui"
+    pass E28 "after quit+relaunch: panes running again (local$( [ $remote = yes ] && echo ' + devbox')), selection kept ($sel); saved: $before; ui=$ui"
   else fail E28 "panes back=$ok selected='$sel' saved='$before'"; fi
 }
 
@@ -754,8 +754,9 @@ E29() {
     for _ in $(seq 40); do seen && break; if trusted; then tmux send-keys -t "$nid" Down; sleep 0.3; tmux send-keys -t "$nid" Enter; fi; sleep 1; done
     seen && shown=yes
   else
-    tried() { rsh "tmux capture-pane -p -J -t '$nid'" | grep -q "claude"; }
-    wait_for 10 tried && shown="ran claude --continue (claude not installed here)"
+    # The pane's login shell (~/.zshrc) and the agent can take a while to start on a remote host.
+    tried() { rsh "tmux capture-pane -p -J -t '$nid'; ps -o args= -t \$(tmux display -p -t '$nid' '#{pane_tty}' | sed 's|/dev/||') 2>/dev/null" | grep -qi "claude"; }
+    wait_for 30 tried && shown="ran claude --continue (no claude -p check on this host)"
   fi
   local ui; ui=$(wsnap E29-resumed)
   [ -n "$nid" ] && mb kill --host "$HOST" --id "$nid" --yes >/dev/null
@@ -783,11 +784,34 @@ E30() {
   else fail E30 "positions='$pos' live='$live'"; fi
 }
 
-ALL=(E1 E2 E3 E4 E5 E6 E7 E8 E10 E11 E12 E18 E19 E20 E21 E23 E26 E27 E29 E30)
+E31() {
+  # Full-screen apps (Claude Code, less, vim) keep their own history: wheel/bar send Page Up/Down,
+  # never tmux copy mode. Uses `less` as the stand-in; not attached, so the user's view is untouched.
+  [ "$TERMINAL" = embedded ] || { skip E31 "built-in terminal only"; return; }
+  mb new --host "$HOST" --name muxbar-e2e-alt --dir /tmp --cmd 'seq 1 500 | less' --no-attach >/dev/null
+  sleep 3
+  local id; id=$(idof muxbar-e2e-alt)
+  top() { rsh "tmux capture-pane -p -t '$id'" | head -1 | tr -d ' '; }
+  local alt; alt=$(mb scroll --host "$HOST" --id muxbar-e2e-alt | grep -o 'alternate=[01]')
+  local t0; t0=$(top)
+  mb scroll --host "$HOST" --id muxbar-e2e-alt --lines -16 >/dev/null; local t1; t1=$(top)
+  mb scroll --host "$HOST" --id muxbar-e2e-alt --pages 1 >/dev/null; local t2; t2=$(top)
+  local mode; mode=$(rsh "tmux display -p -t '$id' '#{pane_in_mode}'")
+  mb kill --host "$HOST" --id "$id" --yes >/dev/null
+  if [ "$alt" = alternate=1 ] && [ "$t0" = 1 ] && [ "$t1" -gt "$t0" ] && [ "$t2" -lt "$t1" ] && [ "$mode" = 0 ]; then
+    pass E31 "full-screen app paged: top line $t0 → $t1 (wheel down) → $t2 (page up); tmux copy mode never entered"
+  else fail E31 "alt=$alt lines $t0 → $t1 → $t2 copyMode=$mode"; fi
+}
+
+ALL=(E1 E2 E3 E4 E5 E6 E7 E8 E10 E11 E12 E18 E19 E20 E21 E23 E26 E27 E29 E30 E31)
 [ "$HOST" = local ] && ALL+=(E13 E14 E17 E22 E25 E28)
 
+# v2 rows (E32–E53): `scripts/e2e.sh v2` runs them all for the host; or name them (E32 E37 …).
+. scripts/e2e-v2.sh
+
 main() {
-  [ -x "$M" ] || { echo "Muxbar not installed"; exit 2; }
+  [ -x "$M" ] || { echo "Muxbar not found at $M (TARGET=$TARGET; for the test instance run make bundle-test)"; exit 2; }
+  if [ "$TARGET" = test ] && ! mb info >/dev/null 2>&1; then app_start || { echo "test instance didn't start"; exit 2; }; fi
   mb info >/dev/null || { echo "Muxbar not running"; exit 2; }
   mb hosts | grep -q "host=$HOST " || mb hosts-add --host "$HOST" >/dev/null
   mb settings-set --terminal "$TERMINAL" >/dev/null
@@ -796,7 +820,14 @@ main() {
   log "=== Muxbar E2E — host=$HOST terminal=$TERMINAL — $(date -u +%FT%TZ)"
   cleanup_e2e
   local tests=("$@"); [ ${#tests[@]} -eq 0 ] && tests=("${ALL[@]}")
-  for t in "${tests[@]}"; do "$t"; done
+  if [ "${tests[0]}" = v2 ]; then tests=("${V2_ALL[@]}"); [ "$HOST" = local ] && tests+=("${V2_LOCAL[@]}"); fi
+  for t in "${tests[@]}"; do
+    # A crash of the test app fails the row it happened in, not every row after it.
+    if [ "$TARGET" = test ] && ! mb info >/dev/null 2>&1; then
+      log "!! test app not answering before $t (crashed?): restarting it"; app_start
+    fi
+    "$t"
+  done
   cleanup_e2e
   sleep 2
   close_e2e_windows

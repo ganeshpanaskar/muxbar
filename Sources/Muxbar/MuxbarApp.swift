@@ -22,10 +22,24 @@ final class AppModel {
         }
         server?.start()
         installWheelMonitor()
+        installClickMonitor()
         Updater.shared.start(store: store)
+        // Holding ⌥ gives text selection back even when apps get the mouse.
+        NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] e in
+            self?.store.applyMousePolicy(optionDown: e.modifierFlags.contains(.option))
+            return e
+        }
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil,
                                                queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.server?.stop() }
+            MainActor.assumeIsolated {
+                self?.server?.stop()
+                // Panes end with the app (their tmux sessions keep running). Without this, a
+                // remote pane's `ssh -t … attach` outlived Muxbar as an orphan still attached to
+                // its session.
+                let n = self?.store.embedded.sessions.count ?? 0
+                self?.store.embedded.stopAll(quitting: true)
+                Log.info("quitting: ended \(n) pane process(es)")
+            }
         }
     }
 }
@@ -38,6 +52,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.async { activateApp() }
         // Window restoration can keep the main window closed across launches; always show it.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { MainWindowPresenter.show() }
+        // A fresh install asks for the root folder and remote hosts.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { SetupPresenter.showIfNeeded() }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -53,26 +69,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 extension AppModel {
     /// Wheel/trackpad over a tmux-backed pane scrolls the session's history (SwiftTerm can't pass
     /// the wheel to tmux itself). Plain panes keep SwiftTerm's own scrollback.
-    func installWheelMonitor() {
-        var pending: CGFloat = 0
-        var flush: DispatchWorkItem?
-        NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
-            guard let self, let key = self.store.selectedKey,
-                  let rec = self.store.state.sessions[key], rec.tmuxID != nil, !rec.ended,
-                  let pane = self.store.embedded.session(key), pane.isRunning,
-                  event.window === pane.view.window else { return event }
-            let p = pane.view.convert(event.locationInWindow, from: nil)
-            guard pane.view.bounds.contains(p) else { return event }
-            // Precise (trackpad) deltas are points; classic wheel deltas are lines.
-            pending += event.hasPreciseScrollingDeltas ? event.scrollingDeltaY / 16 : event.scrollingDeltaY * 3
-            flush?.cancel()
-            let work = DispatchWorkItem { [weak self] in
-                let lines = Int(pending.rounded())
-                pending -= CGFloat(lines)
-                if lines != 0 { self?.store.scrollPane(key, lines: lines) }
+    /// Clicks in a pane: after SwiftTerm has handled one, copy a selection it made or open the web
+    /// link under the pointer (the pane's mouse handlers can't be overridden).
+    func installClickMonitor() {
+        var dragged = false
+        NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
+            guard let self, let window = event.window else { return event }
+            switch event.type {
+            case .leftMouseDown: dragged = false; return event
+            case .leftMouseDragged: dragged = true; return event
+            default: break
             }
-            flush = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: work)
+            let hit = self.store.embedded.sessions.values.first { pane in
+                pane.view.window === window && !pane.view.isHiddenOrHasHiddenAncestor
+                    && pane.view.bounds.contains(pane.view.convert(event.locationInWindow, from: nil))
+            }
+            guard let v = hit?.view as? MuxTerminalView else { return event }
+            let wasDrag = dragged, count = event.clickCount, at = event.locationInWindow
+            dragged = false
+            let command = event.modifierFlags.contains(.command)
+            DispatchQueue.main.async { v.clickFinished(clickCount: count, dragged: wasDrag, at: at) }
+            return command && v.takesCommandClick() ? nil : event
+        }
+    }
+
+    func installWheelMonitor() {
+        NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            guard let self, let window = event.window else { return event }
+            // The pane under the pointer (in the grid that isn't always the selected one).
+            let hit = self.store.embedded.sessions.first { _, pane in
+                guard pane.isRunning, pane.view.window === window, !pane.view.isHiddenOrHasHiddenAncestor else { return false }
+                return pane.view.bounds.contains(pane.view.convert(event.locationInWindow, from: nil))
+            }
+            guard let (key, _) = hit, let rec = self.store.state.sessions[key], rec.tmuxID != nil, !rec.ended else { return event }
+            // Sent at once (not after the wheel stops); the store coalesces while a command runs.
+            self.store.scrollWheel(key, deltaY: event.scrollingDeltaY, precise: event.hasPreciseScrollingDeltas)
             return nil
         }
     }
@@ -92,9 +123,34 @@ struct MuxbarApp: App {
         }
         .defaultSize(width: 720, height: 520)
         .commands {
+            CommandGroup(after: .pasteboard) {
+                Button("Paste Image to Session") { Actions.pasteImage(AppModel.shared.store) }
+                    .keyboardShortcut("v", modifiers: [.command, .shift])
+            }
             CommandMenu("Go") {
-                Button("Next Waiting Session") { Actions.nextWaiting(AppModel.shared.store) }
+                Button("Quick Switch…") {
+                    let s = AppModel.shared.store
+                    s.switcherQuery = ""
+                    MainWindowPresenter.show()
+                    s.switcherOpen.toggle()
+                    if !s.switcherOpen { s.restoreTerminalFocus() }
+                }
+                .keyboardShortcut("k", modifiers: .command)
+                Button("Next in Inbox (waiting, then finished)") { Actions.nextWaiting(AppModel.shared.store) }
                     .keyboardShortcut("j", modifiers: .command)
+                Button("Search History…") { WindowOpener.open?("history") }
+                    .keyboardShortcut("h", modifiers: [.command, .shift])
+                Divider()
+                Button("Grid / Single View") { AppModel.shared.store.toggleExpand() }
+                    .keyboardShortcut(.return, modifiers: .command)
+                Button("Focus Tile Left") { AppModel.shared.store.moveTileFocus(.left) }
+                    .keyboardShortcut(.leftArrow, modifiers: [.control, .command])
+                Button("Focus Tile Right") { AppModel.shared.store.moveTileFocus(.right) }
+                    .keyboardShortcut(.rightArrow, modifiers: [.control, .command])
+                Button("Focus Tile Above") { AppModel.shared.store.moveTileFocus(.up) }
+                    .keyboardShortcut(.upArrow, modifiers: [.control, .command])
+                Button("Focus Tile Below") { AppModel.shared.store.moveTileFocus(.down) }
+                    .keyboardShortcut(.downArrow, modifiers: [.control, .command])
             }
         }
 
@@ -113,7 +169,18 @@ struct MuxbarApp: App {
         }
         .windowResizability(.contentSize)
 
-        Window("Continue Agent Session", id: "continue") {
+        Window("Set up Muxbar", id: "setup") {
+            SetupView()
+                .environmentObject(store)
+        }
+        .windowResizability(.contentSize)
+
+        Window("Search History", id: "history") {
+            HistoryView()
+                .environmentObject(store)
+        }
+
+        Window("Continue Claude Session", id: "continue") {
             ContinueView()
                 .environmentObject(store)
                 .frame(width: 640, height: 480)
@@ -172,6 +239,11 @@ enum LoginItem {
 /// order the main window front explicitly.
 @MainActor
 func activateApp() {
+    // A test instance runs while the user works: never take focus or cover their windows.
+    if TestEnv.isTest {
+        for w in NSApp.windows where w.identifier?.rawValue.hasPrefix("main") == true && w.isVisible { w.orderBack(nil) }
+        return
+    }
     NSApp.activate()
     for w in NSApp.windows where w.identifier?.rawValue.hasPrefix("main") == true && w.isVisible {
         w.orderFrontRegardless()

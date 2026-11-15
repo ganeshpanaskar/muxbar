@@ -1,0 +1,6 @@
+{
+  "name": "muxbar-status",
+  "version": "1.0.0",
+  "description": "Reports the agent's state (working, waiting for you, idle) to Muxbar, the macOS session manager.",
+  "hooks": "./hooks/codex-hooks.json"
+}

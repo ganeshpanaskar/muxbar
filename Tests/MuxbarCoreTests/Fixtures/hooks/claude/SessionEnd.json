@@ -1,0 +1,8 @@
+{
+ "session_id": "55555555-eeee-4eee-8eee-555555555555",
+ "transcript_path": "/Users/u/.claude/projects/-private-tmp-muxbar-e2e-hooks/55555555-eeee-4eee-8eee-555555555555.jsonl",
+ "cwd": "/private/tmp/muxbar-e2e-hooks",
+ "prompt_id": "12121212-dddd-4ddd-8ddd-121212121212",
+ "hook_event_name": "SessionEnd",
+ "reason": "prompt_input_exit"
+}

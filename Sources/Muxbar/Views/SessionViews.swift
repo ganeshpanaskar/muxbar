@@ -8,7 +8,7 @@ extension SessionStatus {
         case .working: return .blue
         case .waiting: return .orange
         case .idle, .running: return .green
-        case .notAgent, .notRunning: return .gray
+        case .notClaude, .notRunning: return .gray
         case .unknown: return .secondary.opacity(0.5)
         case .ended: return .clear
         }
@@ -17,11 +17,16 @@ extension SessionStatus {
 
 func relativeAge(_ epoch: Int?) -> String {
     guard let epoch, epoch > 0 else { return "" }
+    return "active " + timeAgo(epoch)
+}
+
+/// "just now", "3m ago", "2h ago", "4d ago".
+func timeAgo(_ epoch: Int) -> String {
     let s = max(0, Int(Date().timeIntervalSince1970) - epoch)
-    if s < 60 { return "active just now" }
-    if s < 3600 { return "active \(s / 60)m ago" }
-    if s < 86400 { return "active \(s / 3600)h ago" }
-    return "active \(s / 86400)d ago"
+    if s < 60 { return "just now" }
+    if s < 3600 { return "\(s / 60)m ago" }
+    if s < 86400 { return "\(s / 3600)h ago" }
+    return "\(s / 86400)d ago"
 }
 
 /// The session list shared by the menu-bar popover and the main window.
@@ -149,6 +154,52 @@ struct SessionRow: View {
 /// User-initiated actions with NSAlert dialogs (work from the menu-bar popover too).
 @MainActor
 enum Actions {
+    /// Removing a host with sessions asks first: Muxbar forgets them (they keep running there).
+    @MainActor static func confirmRemoveHost(_ store: SessionStore, _ host: String) {
+        let n = store.sessions(for: host).filter { !$0.ended }.count
+        if n > 0 {
+            let alert = NSAlert()
+            alert.messageText = "Remove \(host)?"
+            alert.informativeText = "Muxbar forgets its \(n) session\(n == 1 ? "" : "s") on \(host) (names in Muxbar and groups). They keep running there; adding the host again finds them."
+            alert.addButton(withTitle: "Remove")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        store.removeHost(host)
+    }
+
+    static func pasteImage(_ store: SessionStore) {
+        guard let key = store.viewedKey ?? store.selectedKey else { NSSound.beep(); return }
+        Task { do { try await store.pasteClipboardImage(key) } catch { report(store, error) } }
+    }
+
+    /// Above 100 MB a drop asks first.
+    @MainActor static func confirmLargeDrop(_ message: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "Copy")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    static func sleep(_ store: SessionStore, _ rec: SessionRecord) {
+        Task { do { try await store.sleep(rec.key) } catch { report(store, error) } }
+    }
+
+    static func wake(_ store: SessionStore, _ rec: SessionRecord) {
+        Task { do { try await store.wake(rec.key) } catch { report(store, error) } }
+    }
+
+    static func sleepIdle(_ store: SessionStore, host: String) {
+        Task {
+            let res = await store.sleepIdle(host: host)
+            let slept = res.filter { $0.result == "slept" }
+            let freed = slept.reduce(0) { $0 + $1.freedKB }
+            store.banner = slept.isEmpty ? "No idle agents could sleep on \(store.hostLabel(host))."
+                : "Slept \(slept.count) agent\(slept.count == 1 ? "" : "s") on \(store.hostLabel(host)), freeing ~\(formatKB(freed)). Open a session to wake it."
+        }
+    }
+
     static func report(_ store: SessionStore, _ error: Error) {
         Log.error("action failed: \(error)")
         store.banner = error.localizedDescription
@@ -183,7 +234,7 @@ enum Actions {
         alert.messageText = "Kill “\(rec.name)” on \(where_)?"
         alert.informativeText = rec.isPlainTab
             ? "Removes it from Muxbar. The terminal window is left open."
-            : "This runs tmux kill-session \(rec.tmuxID ?? "") on \(where_). Anything running in it (including any agent) stops. This can't be undone."
+            : "This runs tmux kill-session \(rec.tmuxID ?? "") on \(where_). Anything running in it (including Claude) stops. This can't be undone."
         alert.addButton(withTitle: "Kill Session")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -255,6 +306,12 @@ enum Actions {
         Task { do { _ = try await store.resumeEnded(key: rec.key) } catch { report(store, error) } }
     }
 
+    static func newSession(_ store: SessionStore, host: String, group: String?) {
+        store.newSessionPrefill = (host, group)
+        activateApp()
+        WindowOpener.open?("new")
+    }
+
     static func setGroup(_ store: SessionStore, _ rec: SessionRecord, _ g: String?) {
         Task { do { try await store.setGroup(key: rec.key, group: g) } catch { report(store, error) } }
     }
@@ -320,7 +377,7 @@ struct MainWindow: View {
                 .navigationSplitViewColumnWidth(min: 220, ideal: 270, max: 400)
         } detail: {
             if store.settings.terminal == .embedded {
-                DetailPane()
+                if store.inGrid { GridPane() } else { DetailPane() }
             } else {
                 ScrollView { SessionList(compact: false).padding(16) }
             }
@@ -333,6 +390,16 @@ struct MainWindow: View {
             ToolbarItem {
                 Button { store.refreshAll() } label: { Label("Refresh", systemImage: "arrow.clockwise") }
                     .help("Refresh")
+            }
+            ToolbarItem {
+                if store.gridKeys.count >= 2 && store.settings.terminal == .embedded {
+                    Picker("Layout", selection: Binding(get: { store.state.layout },
+                                                        set: { v in if v != store.state.layout { store.toggleExpand() } })) {
+                        Image(systemName: "rectangle").tag(PaneLayout.single).help("One session (⌘⏎)")
+                        Image(systemName: "square.grid.2x2").tag(PaneLayout.grid).help("Grid (⌘⏎)")
+                    }
+                    .pickerStyle(.segmented)
+                }
             }
             ToolbarItem {
                 SettingsLink { Label("Settings", systemImage: "gearshape") }
@@ -349,6 +416,7 @@ struct MainWindow: View {
                 }
             }
         }
+        .overlay { if store.switcherOpen { QuickSwitcherView() } }
         .onAppear { store.viewAppeared() }
         .onDisappear { store.viewDisappeared() }
     }
@@ -365,27 +433,52 @@ struct Sidebar: View {
             // Rows in "Needs input" are tagged "pin:<key>" so a session can appear twice.
             let k = raw.map { $0.hasPrefix("pin:") ? String($0.dropFirst(4)) : $0 }
             guard k != store.selectedKey else { return }
+            // ⌘-click: the session joins (or leaves) the grid instead.
+            if let k, NSApp.currentEvent?.modifierFlags.contains(.command) == true, store.settings.terminal == .embedded {
+                store.toggleInGrid(k); return
+            }
+            if let k, store.state.layout == .grid, store.gridKeys.contains(k) { store.focusTile(k); return }
+            if store.state.layout == .grid { store.mutate { $0.layout = .single }; store.focusedTile = nil }
             if let k, let rec = store.state.sessions[k], !rec.ended { Actions.focus(store, rec) } else { store.select(k) }
         })) {
+            if store.needsSetup {
+                HStack {
+                    Image(systemName: "sparkles").foregroundStyle(.blue)
+                    Text("Finish setting up Muxbar").font(.callout)
+                    Spacer()
+                    Button("Set Up…") { openWindow(id: "setup") }
+                }
+            }
             if let banner = store.banner {
                 BannerView(text: banner, automation: store.automationDenied) { store.banner = nil }
             }
+            // Inbox: needs input first (longest waiting), then finished and unread (newest first).
             let waiting = store.waitingSessions
-            if !waiting.isEmpty {
+            let finished = store.unreadFinished
+            if !waiting.isEmpty || !finished.isEmpty {
                 Section {
-                    ForEach(waiting) { rec in
-                        SidebarRow(rec: rec, location: store.location(of: rec)).tag("pin:" + rec.key)
+                    ForEach(waiting + finished) { rec in
+                        SidebarRow(rec: rec, location: store.location(of: rec), inInbox: true).tag("pin:" + rec.key)
                     }
                 } header: {
                     HStack(spacing: 6) {
-                        Image(systemName: "hand.raised.fill").foregroundStyle(.orange)
-                        Text("Needs input").foregroundStyle(.orange)
-                        Text("\(waiting.count)").font(.caption2).fontWeight(.bold)
-                            .padding(.horizontal, 5).padding(.vertical, 1)
-                            .background(Capsule().fill(Color.orange.opacity(0.25))).foregroundStyle(.orange)
+                        Image(systemName: waiting.isEmpty ? "tray.full.fill" : "hand.raised.fill")
+                            .foregroundStyle(waiting.isEmpty ? Color.blue : .orange)
+                        Text("Inbox").foregroundStyle(waiting.isEmpty ? Color.blue : .orange)
+                        if !waiting.isEmpty {
+                            Text("\(waiting.count) waiting").font(.caption2).fontWeight(.bold)
+                                .padding(.horizontal, 5).padding(.vertical, 1)
+                                .background(Capsule().fill(Color.orange.opacity(0.25))).foregroundStyle(.orange)
+                        }
+                        if !finished.isEmpty {
+                            Text("\(finished.count) finished").font(.caption2).fontWeight(.bold)
+                                .padding(.horizontal, 5).padding(.vertical, 1)
+                                .background(Capsule().fill(Color.blue.opacity(0.22))).foregroundStyle(.blue)
+                        }
                         Spacer()
                         Text("⌘J next").font(.caption2).foregroundStyle(.secondary)
                     }
+                    .contextMenu { Button("Mark All Read") { store.markAllRead() } }
                 }
             }
             ForEach(store.state.hosts, id: \.self) { host in
@@ -403,6 +496,9 @@ struct Sidebar: View {
                     }
                     let others = store.otherSessions(for: host)
                     if !others.isEmpty { OthersNode(host: host, sessions: others) }
+                    if host != localHost && (!(store.hostPorts[host] ?? []).isEmpty || !(store.state.forwards[host] ?? []).isEmpty) {
+                        PortsNode(host: host)
+                    }
                 } header: {
                     HostHeader(host: host)
                         .dropDestination(for: String.self) { keys, _ in
@@ -412,7 +508,11 @@ struct Sidebar: View {
                             return true
                         }
                         .contextMenu {
+                            Button("New Session on \(store.hostLabel(host))…") { Actions.newSession(store, host: host, group: nil) }
                             Button("New Group on \(store.hostLabel(host))…") { Actions.newGroup(store, host: host) }
+                            Divider()
+                            Button("Mark All Read on \(store.hostLabel(host))") { store.markAllRead(host: host) }
+                            Button("Sleep Idle Agents on \(store.hostLabel(host))") { Actions.sleepIdle(store, host: host) }
                         }
                 }
             }
@@ -423,7 +523,7 @@ struct Sidebar: View {
             VStack(alignment: .leading, spacing: 6) {
                 Button { openWindow(id: "new") } label: { Label("New Session", systemImage: "plus") }
                 Button { Actions.newGroup(store, host: nil) } label: { Label("New Group", systemImage: "folder.badge.plus") }
-                Button { openWindow(id: "continue") } label: { Label("Continue Agent Session…", systemImage: "arrow.uturn.forward") }
+                Button { openWindow(id: "continue") } label: { Label("Continue Claude Session…", systemImage: "arrow.uturn.forward") }
                 SettingsLink { Label("Settings…", systemImage: "gearshape") }
             }
             .buttonStyle(.borderless)
@@ -452,12 +552,19 @@ struct GroupNode: View {
         } label: {
             HStack {
                 let waitingN = store.waitingCount(group: group, host: host)
+                let unreadN = store.unreadCount(group: group, host: host)
                 Label {
                     Text(group)
                 } icon: {
                     WaitingFolderIcon(waiting: waitingN > 0)
                 }
                 Spacer()
+                if unreadN > 0 {
+                    Text("\(unreadN)").font(.caption2).fontWeight(.bold)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Capsule().fill(Color.blue.opacity(0.25))).foregroundStyle(.blue)
+                        .help("\(unreadN) finished, not seen yet")
+                }
                 if waitingN > 0 {
                     Text("\(waitingN)").font(.caption2).fontWeight(.bold)
                         .padding(.horizontal, 5).padding(.vertical, 1)
@@ -475,6 +582,12 @@ struct GroupNode: View {
                 return !own.isEmpty
             }
             .contextMenu {
+                Button("New Session in “\(group)”…") { Actions.newSession(store, host: host, group: group) }
+                Button("Show Group in Grid") {
+                    store.showInGrid(store.sessions(inGroup: group, host: host).filter { !$0.ended }.map(\.key))
+                }
+                .disabled(store.sessions(inGroup: group, host: host).filter { !$0.ended }.count < 2)
+                Divider()
                 Button("Rename Group…") { Actions.renameGroup(store, host: host, group) }
                 Button("Delete Group") { Actions.deleteGroup(store, host: host, group) }
             }
@@ -502,6 +615,17 @@ struct HostHeader: View {
                     .background(Capsule().fill(Color.orange.opacity(0.25)))
                     .foregroundStyle(.orange)
             }
+            if let m = store.hostMemory[host] {
+                MemoryChip(host: host, mem: m)
+            }
+            let unreadN = store.unreadCount(host: host)
+            if unreadN > 0 {
+                Text("\(unreadN) new").font(.caption2).fontWeight(.semibold)
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(Capsule().fill(Color.blue.opacity(0.22)))
+                    .foregroundStyle(.blue)
+                    .help("\(unreadN) finished, not seen yet")
+            }
             if health != .ok {
                 Text(health.label).font(.caption2)
                     .padding(.horizontal, 4).padding(.vertical, 1)
@@ -517,25 +641,52 @@ struct HostHeader: View {
 
 struct SidebarRow: View {
     @EnvironmentObject var store: SessionStore
+    @StateObject private var hover = HoverState()
     var rec: SessionRecord
-    /// Where the session lives ("devbox · api"); shown in the pinned Needs input section.
+    /// Where the session lives ("devbox · API"); shown in the Inbox.
     var location: String? = nil
+    var inInbox = false
 
     var body: some View {
         let status = store.status(of: rec)
         let waiting = status == .waiting
+        let unread = rec.unread && !waiting && !rec.ended
         HStack(spacing: 8) {
             StatusDot(status: status)
             VStack(alignment: .leading, spacing: 1) {
-                Text(rec.name).lineLimit(1).foregroundStyle(rec.ended ? .secondary : .primary)
+                HStack(spacing: 4) {
+                    if unread { Circle().fill(Color.blue).frame(width: 7, height: 7).help("Finished — not seen yet") }
+                    Text(rec.name).lineLimit(1).foregroundStyle(rec.ended ? .secondary : .primary)
+                        .fontWeight(waiting || unread ? .semibold : .regular)
+                }
+                Text(subtitle(status: status, waiting: waiting, unread: unread))
+                    .font(.caption).foregroundStyle(waiting ? Color.orange : (unread ? Color.blue : .secondary)).lineLimit(1)
                     .fontWeight(waiting ? .semibold : .regular)
-                Text(rec.ended ? "ended" : (waiting ? "Needs input · \(location ?? relativeAge(rec.lastActivity))" : "\(status.label) · \(relativeAge(rec.lastActivity))"))
-                    .font(.caption).foregroundStyle(waiting ? Color.orange : .secondary).lineLimit(1)
-                    .fontWeight(waiting ? .semibold : .regular)
+                if inInbox && unread, let reply = rec.lastReply, !reply.isEmpty {
+                    Text(reply).font(.caption2).foregroundStyle(.secondary).lineLimit(1).help(reply)
+                }
             }
             Spacer(minLength: 0)
+            if let kb = store.live[rec.key]?.memoryKB, kb >= 1_048_576, !rec.ended {
+                Text(formatKB(kb)).font(.caption2.monospacedDigit())
+                    .foregroundStyle(kb >= 8 * 1_048_576 ? Color.orange : .secondary)
+                    .help("Memory used by this session's processes")
+            }
             if waiting { Image(systemName: "hand.raised.fill").font(.caption).foregroundStyle(.orange).help("Waiting for your input") }
+            if rec.sleep != nil { Image(systemName: "moon.zzz.fill").font(.caption).foregroundStyle(.indigo).help("Agent asleep — open the session to wake it") }
+            if !rec.ended && (hover.on || store.selectedKey == rec.key) {
+                Menu {
+                    Button("Close Pane (keeps running)") { store.closePane(key: rec.key) }
+                        .disabled(store.embedded.session(rec.key) == nil)
+                    Button("Kill Session…", role: .destructive) { Actions.kill(store, rec) }
+                } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Close the pane or kill the session")
+            }
         }
+        .onHover { hover.on = $0 }
         .padding(.vertical, 2).padding(.horizontal, 4)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.opacity(waiting ? 0.16 : 0)))
         .modifier(DraggableUnlessOutside(rec: rec))
@@ -557,8 +708,30 @@ struct SidebarRow: View {
             }
             Divider()
             if !rec.ended {
+                if rec.unread {
+                    Button("Mark as Read") { store.setUnread(rec.key, false) }
+                } else {
+                    Button("Mark as Unread") { store.setUnread(rec.key, true) }
+                }
+                if rec.sleep != nil {
+                    Button("Wake Agent") { Actions.wake(store, rec) }
+                } else if store.live[rec.key]?.agent != nil {
+                    Button("Sleep Agent (frees ~\(formatKB(store.live[rec.key]?.memoryKB ?? 0)))") { Actions.sleep(store, rec) }
+                        .disabled(store.status(of: rec) != .idle)
+                }
+                Toggle("Never Sleep", isOn: Binding(get: { rec.neverSleep },
+                                                    set: { v in store.mutate { $0.sessions[rec.key]?.neverSleep = v } }))
+                if store.settings.terminal == .embedded {
+                    if store.state.layout == .grid && store.gridKeys.contains(rec.key) {
+                        Button("Remove from Grid") { store.removeFromGrid(rec.key) }
+                    } else {
+                        Button("Add to Grid (⌘-click)") { store.toggleInGrid(rec.key) }
+                    }
+                }
                 Button("Rename…") { Actions.rename(store, rec) }
                 Button("Reconnect") { Actions.reconnect(store, rec) }
+                Button("Close Pane (keeps running)") { store.closePane(key: rec.key) }
+                    .disabled(store.embedded.session(rec.key) == nil)
                 Divider()
                 Button("Kill Session…", role: .destructive) { Actions.kill(store, rec) }
             } else {
@@ -566,6 +739,114 @@ struct SidebarRow: View {
                 Button("Remove from list") { Actions.remove(store, rec) }
             }
         }
+    }
+}
+
+/// Host memory in the host header ("26/31 GB"), coloured by level; click for details.
+struct MemoryChip: View {
+    @EnvironmentObject var store: SessionStore
+    let host: String
+    let mem: HostMemory
+
+    var body: some View {
+        let level = store.memoryLevel(host)
+        let color: Color = level == .critical ? .red : (level == .warn ? .orange : .secondary)
+        Button {
+            store.memoryPopoverHost = host
+        } label: {
+            Text("\(Int((Double(mem.usedKB) / 1_048_576).rounded()))/\(Int((Double(mem.totalKB) / 1_048_576).rounded())) GB")
+                .font(.caption2.monospacedDigit()).fontWeight(level == .normal ? .regular : .semibold)
+                .foregroundStyle(color)
+                .padding(.horizontal, 4).padding(.vertical, 1)
+                .background(Capsule().fill(color.opacity(level == .normal ? 0.08 : 0.2)))
+        }
+        .buttonStyle(.plain)
+        .help("Memory: \(Int(mem.usedPercent))% used — click for the biggest sessions and processes")
+        .popover(isPresented: Binding(get: { store.memoryPopoverHost == host },
+                                      set: { if !$0 && store.memoryPopoverHost == host { store.memoryPopoverHost = nil } })) {
+            MemoryPopover(host: host).environmentObject(store)
+        }
+    }
+}
+
+struct MemoryPopover: View {
+    @EnvironmentObject var store: SessionStore
+    let host: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("\(store.hostLabel(host)) memory").font(.headline)
+            if let m = store.hostMemory[host] {
+                let level = store.memoryLevel(host)
+                ProgressView(value: min(100, m.usedPercent), total: 100)
+                    .tint(level == .critical ? .red : (level == .warn ? .orange : .accentColor))
+                Text("\(formatKB(m.usedKB)) of \(formatKB(m.totalKB)) used (\(Int(m.usedPercent))%)"
+                     + (m.swapTotalKB > 0 ? " · swap \(formatKB(m.swapTotalKB - m.swapFreeKB)) used" : " · no swap")
+                     + (m.load.first.map { String(format: " · load %.1f", $0) } ?? "") + (m.cpus > 0 ? " (\(m.cpus) CPUs)" : ""))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            let recs = store.sessions(for: host).filter { !$0.ended && (store.live[$0.key]?.memoryKB ?? 0) > 0 }
+                .sorted { (store.live[$0.key]?.memoryKB ?? 0) > (store.live[$1.key]?.memoryKB ?? 0) }.prefix(8)
+            if !recs.isEmpty {
+                Text("Sessions").font(.subheadline.weight(.semibold))
+                ForEach(Array(recs)) { r in
+                    HStack {
+                        Text(r.name).font(.caption).lineLimit(1)
+                        Spacer()
+                        Text(formatKB(store.live[r.key]?.memoryKB ?? 0)).font(.caption.monospacedDigit())
+                    }
+                }
+            }
+            let cand = store.sleepCandidates(host: host)
+            if cand.count > 0 {
+                Button("Sleep \(cand.count) idle agent session\(cand.count == 1 ? "" : "s") (~\(formatKB(cand.kb)))") {
+                    Actions.sleepIdle(store, host: host)
+                }
+                .help("Exits idle agents (their conversations resume when you open the session again)")
+            }
+            Text("Processes").font(.subheadline.weight(.semibold))
+            let top = (store.topProcesses[host] ?? []).prefix(8)
+            if top.isEmpty { Text("Loading…").font(.caption).foregroundStyle(.secondary) }
+            ForEach(Array(top), id: \.pid) { p in
+                HStack(spacing: 6) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(p.shortName).font(.caption).lineLimit(1)
+                        Text(p.pane.flatMap { store.session(host: host, pane: $0)?.name } ?? "pid \(p.pid)")
+                            .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    Spacer()
+                    Text(formatKB(p.rssKB)).font(.caption.monospacedDigit())
+                    Button("Stop…") { confirmStop(p) }.controlSize(.small)
+                }
+                .help(p.args)
+            }
+        }
+        .padding(12)
+        .frame(width: 380)
+        .task { await store.fetchTopProcesses(host) }
+    }
+
+    func confirmStop(_ p: ProcessUsage) {
+        let alert = NSAlert()
+        alert.messageText = "Stop \(p.shortName) (pid \(p.pid)) on \(store.hostLabel(host))?"
+        alert.informativeText = "Muxbar sends it SIGTERM, so it can clean up and exit. It uses \(formatKB(p.rssKB)).\n\n\(p.args.prefix(300))"
+        alert.addButton(withTitle: "Stop")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        Task { do { try await store.stopProcess(host: host, pid: p.pid) } catch { Actions.report(store, error) } }
+    }
+}
+
+extension SidebarRow {
+    func subtitle(status: SessionStatus, waiting: Bool, unread: Bool) -> String {
+        if rec.ended { return "ended" }
+        if let s = rec.sleep { return "Sleeping · freed \(formatKB(s.freedKB))" }
+        if waiting { return "Needs input · \(location ?? relativeAge(rec.lastActivity))" }
+        if unread {
+            let when = timeAgo(rec.finishedAt ?? rec.lastActivity ?? Int(Date().timeIntervalSince1970))
+            return inInbox ? "Finished \(when) · \(location ?? "")" : "Finished · \(when)"
+        }
+        return "\(status.label) · \(relativeAge(rec.lastActivity))"
     }
 }
 
@@ -582,12 +863,29 @@ struct DetailPane: View {
                     VStack(spacing: 12) {
                         Image(systemName: "moon.zzz").font(.system(size: 34)).foregroundStyle(.secondary)
                         Text("This session has ended").font(.headline)
-                        Text("Its tmux session is gone (for example after a restart). Resume recreates it in \(rec.managedDir ?? rec.path ?? "~") and continues its agent there.")
+                        Text("Its tmux session is gone (for example after a restart). Resume recreates it in \(rec.managedDir ?? rec.path ?? "~") and continues Claude there.")
                             .foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 460)
                         Button("Resume Session") { Actions.resumeEnded(store, rec) }.keyboardShortcut(.defaultAction)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if let pane = store.embedded.session(key) {
+                    if let p = store.dropProgress {
+                        HStack(spacing: 8) { ProgressView().controlSize(.small); Text(p).font(.callout); Spacer() }
+                            .padding(.horizontal, 12).padding(.vertical, 6)
+                        Divider()
+                    }
+                    if let sl = rec.sleep {
+                        HStack(spacing: 8) {
+                            Image(systemName: "moon.zzz.fill").foregroundStyle(.indigo)
+                            Text("\(sl.agent.displayName) is asleep (freed \(formatKB(sl.freedKB)) · \(timeAgo(sl.sleptAt))). Waking resumes the same conversation.")
+                                .font(.callout).lineLimit(2)
+                            Spacer()
+                            Button("Wake") { Actions.wake(store, rec) }.keyboardShortcut(.defaultAction)
+                        }
+                        .padding(.horizontal, 12).padding(.vertical, 8)
+                        .background(Color.indigo.opacity(0.12))
+                        Divider()
+                    }
                     PaneView(pane: pane, rec: rec)
                 } else {
                     placeholder("Connecting…", systemImage: "network")
@@ -641,11 +939,17 @@ struct PaneView: View {
     @ObservedObject var pane: EmbeddedSession
     @EnvironmentObject var store: SessionStore
     var rec: SessionRecord
+    /// Only the pane on screen alone, or the focused grid tile, takes the keyboard.
+    var takeFocus = true
+    var tile = false
 
     var body: some View {
         ZStack(alignment: .trailing) {
-            TerminalPaneHost(pane: pane, generation: pane.starts)
-                .padding(.trailing, rec.tmuxID != nil ? HistoryScrollBar.width + 4 : 0)
+            TerminalPaneHost(pane: pane, generation: pane.starts, takeFocus: takeFocus, tile: tile) {
+                // A click in a grid tile focuses that tile.
+                if store.state.layout == .grid, store.gridKeys.contains(rec.key), store.focusedTile != rec.key { store.focusTile(rec.key) }
+            }
+                .padding(.trailing, rec.tmuxID != nil ? 14 : 0)
             if rec.tmuxID != nil, pane.isRunning {
                 HistoryScrollBar(key: rec.key)
             }
@@ -670,22 +974,60 @@ struct PaneView: View {
 struct TerminalPaneHost: NSViewRepresentable {
     let pane: EmbeddedSession
     var generation: Int
+    var takeFocus = true
+    var tile = false
+    var onClick: () -> Void = {}
+
+    /// Remembers the single-view size, so panes leaving the grid can get it back (tmux sizes each
+    /// window to its pane).
+    final class PaneContainer: NSView {
+        @MainActor static var lastSingleSize: NSSize?
+        var tile = false
+        override func setFrameSize(_ newSize: NSSize) {
+            super.setFrameSize(newSize)
+            if !tile && newSize.width > 100 && newSize.height > 60 { PaneContainer.lastSingleSize = newSize }
+        }
+
+        /// The terminal is always exactly the container. (Autoresizing adds size deltas: a view that
+        /// kept its old size while this container was still empty would end up larger than it.)
+        override func resizeSubviews(withOldSize oldSize: NSSize) {
+            for v in subviews { v.frame = bounds }
+        }
+    }
+
+    final class Coordinator: NSObject {
+        var onClick: () -> Void = {}
+        @objc func clicked() { onClick() }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> NSView {
-        let container = NSView()
+        let container = PaneContainer()
+        container.tile = tile
         container.wantsLayer = true
+        // Sees clicks anywhere in the terminal without delaying them (SwiftTerm's own mouse
+        // handling and focus aren't overridable).
+        let click = NSClickGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.clicked))
+        click.delaysPrimaryMouseButtonEvents = false
+        container.addGestureRecognizer(click)
         return container
     }
 
     func updateNSView(_ container: NSView, context: Context) {
+        context.coordinator.onClick = onClick
+        (container as? PaneContainer)?.tile = tile
         let term = pane.view
         if term.superview !== container {
             container.subviews.forEach { $0.removeFromSuperview() }
-            term.frame = container.bounds
-            term.autoresizingMask = [.width, .height]
+            term.autoresizingMask = []
+            term.frame = container.bounds   // ignored by the view while the container is still empty
             container.addSubview(term)
         }
-        DispatchQueue.main.async { term.window?.makeFirstResponder(term) }
+        // A view has one superview: moving it into this container takes it out of the old one
+        // (single view ↔ grid tile), and the attach keeps running.
+        guard takeFocus else { return }
+        DispatchQueue.main.async { if term.window?.firstResponder !== term { term.window?.makeFirstResponder(term) } }
     }
 }
 
@@ -699,7 +1041,7 @@ struct FolderField: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            TextField("Folder", text: $path, prompt: Text(host == localHost ? "~/src/project" : "~/src/project"))
+            TextField("Folder", text: $path, prompt: Text("~/src/project"))
                 .labelsHidden()   // the caller supplies the label
             if host == localHost {
                 Button { pick() } label: { Image(systemName: "folder") }
@@ -721,6 +1063,7 @@ struct FolderField: View {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
+        panel.canCreateDirectories = true   // "New Folder" in the panel
         panel.allowsMultipleSelection = false
         panel.prompt = "Choose"
         let start = (path as NSString).expandingTildeInPath
@@ -819,124 +1162,108 @@ struct DraggableUnlessOutside: ViewModifier {
     }
 }
 
-/// Scroll bar for a session's history. Normally the history lives in tmux (the pane shows tmux's
-/// screen), so the bar reads and drives tmux copy mode: drag, click above/below the thumb to page,
-/// or use the wheel/trackpad over the pane. "Live" returns to the bottom.
-/// A full-screen app (e.g. Claude Code's full-screen UI) keeps its own history, so the bar turns
-/// into a scroll strip that sends scrolling to the app: ▲/▼ or click to page, drag to scroll.
+/// Scroll bar for a session's history. The history lives in tmux (the pane shows tmux's screen),
+/// so the bar reads and drives tmux copy mode: drag, click above/below the thumb to page, or use
+/// the wheel/trackpad over the pane. "Live" returns to the bottom.
 struct HistoryScrollBar: View {
     @EnvironmentObject var store: SessionStore
     var key: String
     @StateObject private var poll = ScrollPoller()
     @StateObject private var drag = DragState()
-    @State private var hover = false
-
-    static let width: CGFloat = 12
 
     var body: some View {
         let info = store.scrollInfo[key]
-        ZStack(alignment: .bottomTrailing) {
-            Group {
-                if info?.fullscreen == true { appStrip(info!) } else { historyBar(info) }
-            }
-            .frame(width: Self.width)
-            .padding(.vertical, 4).padding(.trailing, 2)
-            .onHover { hover = $0 }
-            if let info, !info.fullscreen, !info.atLive {
-                Button { store.scrollPane(key, toPosition: 0) } label: {
-                    Label("Live", systemImage: "arrow.down.to.line")
-                }
-                .buttonStyle(.borderedProminent).controlSize(.small)
-                .padding(.trailing, 22).padding(.bottom, 10)
-                .help("Back to live output (typing does this too)")
+        Group {
+            if let info, !info.usesTmuxHistory {
+                AppPageBar(key: key, active: info.alternate)
+            } else {
+                tmuxHistoryBar(info)
             }
         }
         .onAppear { poll.start(store: store, key: key) }
         .onDisappear { poll.stop() }
     }
 
-    private var trackFill: Color { Color.primary.opacity(hover || drag.active ? 0.14 : 0.08) }
-
-    /// tmux history: a real thumb sized and placed by history length and position.
-    private func historyBar(_ info: TmuxScrollInfo?) -> some View {
-        GeometryReader { geo in
-            let h = geo.size.height
-            let top = (info?.thumbTop ?? 1) * h
-            let th = max(28, (info?.thumbHeight ?? 1) * h)
-            ZStack(alignment: .top) {
-                RoundedRectangle(cornerRadius: 6).fill(trackFill)
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.primary.opacity(drag.active ? 0.6 : (hover ? 0.5 : 0.4)))
-                    .frame(height: min(th, h))
-                    .offset(y: min(max(0, top), h - min(th, h)))
-            }
-            .contentShape(Rectangle())
-            .gesture(DragGesture(minimumDistance: 0)
-                .onChanged { g in
-                    guard let info else { return }
-                    if !drag.active {
-                        drag.active = true
-                        let inThumb = g.startLocation.y >= top && g.startLocation.y <= top + th
-                        if !inThumb {
-                            // Click on the track: page up/down by a screen.
-                            let page = max(1, info.height - 2)
-                            store.scrollPane(key, lines: g.startLocation.y < top ? page : -page)
-                            drag.paging = true
-                            return
-                        }
-                        drag.grab = g.startLocation.y - top
-                    }
-                    guard !drag.paging else { return }
-                    let f = Double((g.location.y - drag.grab) / h)
-                    store.scrollPane(key, toPosition: info.position(forThumbTop: f))
+    @ViewBuilder
+    private func tmuxHistoryBar(_ info: TmuxScrollInfo?) -> some View {
+        ZStack(alignment: .bottomTrailing) {
+            GeometryReader { geo in
+                let h = geo.size.height
+                let top = (info?.thumbTop ?? 1) * h
+                let th = max(24, (info?.thumbHeight ?? 1) * h)
+                ZStack(alignment: .top) {
+                    RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(0.06))
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(Color.primary.opacity(drag.active ? 0.55 : 0.35))
+                        .frame(height: min(th, h))
+                        .offset(y: min(max(0, top), h - min(th, h)))
                 }
-                .onEnded { _ in drag.active = false; drag.paging = false })
-            .help(info.map { $0.history == 0 ? "No scrollback yet" : "Scroll back through \($0.history) lines of history" }
-                  ?? "Scroll back through this session's history")
+                .frame(width: 10)
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0)
+                    .onChanged { g in
+                        guard let info else { return }
+                        if !drag.active {
+                            drag.active = true
+                            let inThumb = g.startLocation.y >= top && g.startLocation.y <= top + th
+                            if !inThumb {
+                                // Click on the track: page up/down by a screen.
+                                let page = max(1, info.height - 2)
+                                store.scrollPane(key, lines: g.startLocation.y < top ? page : -page)
+                                drag.paging = true
+                                return
+                            }
+                            drag.grab = g.startLocation.y - top
+                        }
+                        guard !drag.paging else { return }
+                        let f = Double((g.location.y - drag.grab) / h)
+                        store.scrollPane(key, toPosition: info.position(forThumbTop: f))
+                    }
+                    .onEnded { _ in drag.active = false; drag.paging = false })
+                .help("Scroll back through this session's history")
+            }
+            .frame(width: 10)
+            .padding(.vertical, 4).padding(.trailing, 2)
+            if let info, !info.atLive {
+                Button { store.scrollPane(key, toPosition: 0) } label: {
+                    Label("Live", systemImage: "arrow.down.to.line")
+                }
+                .buttonStyle(.borderedProminent).controlSize(.small)
+                .padding(.trailing, 20).padding(.bottom, 10)
+                .help("Back to live output (typing does this too)")
+            }
         }
     }
+}
 
-    /// Full-screen app: the app owns its history and position, so there's no thumb — ▲/▼ page,
-    /// clicking the upper/lower half pages, and dragging scrolls by the distance moved.
-    private func appStrip(_ info: TmuxScrollInfo) -> some View {
-        GeometryReader { geo in
-            let h = geo.size.height
-            VStack(spacing: 0) {
-                Image(systemName: "chevron.up").font(.system(size: 8, weight: .bold))
-                    .frame(width: Self.width, height: 18)
+/// For full-screen apps (Claude Code, less, vim) the history lives inside the app, which doesn't
+/// report a position, so the bar pages instead: ▲ / ▼ or click the upper / lower half.
+struct AppPageBar: View {
+    @EnvironmentObject var store: SessionStore
+    var key: String
+    var active: Bool
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Button { store.scrollPages(key, 1) } label: { Image(systemName: "chevron.up") }
+                .help("Page up (sends Page Up to the app)")
+            GeometryReader { geo in
+                RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(active ? 0.08 : 0.03))
                     .contentShape(Rectangle())
-                    .onTapGesture { store.scrollPane(key, pages: 1) }
-                Spacer(minLength: 0)
-                Capsule().fill(Color.primary.opacity(drag.active ? 0.6 : (hover ? 0.5 : 0.35)))
-                    .frame(width: 4, height: min(48, max(16, h / 6)))
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
-                    .frame(width: Self.width, height: 18)
-                    .contentShape(Rectangle())
-                    .onTapGesture { store.scrollPane(key, pages: -1) }
+                    .onTapGesture(coordinateSpace: .local) { p in
+                        store.scrollPages(key, p.y < geo.size.height / 2 ? 1 : -1)
+                    }
             }
-            .foregroundStyle(Color.primary.opacity(hover ? 0.75 : 0.5))
-            .background(RoundedRectangle(cornerRadius: 6).fill(trackFill))
-            .contentShape(Rectangle())
-            .gesture(DragGesture(minimumDistance: 0)
-                .onChanged { g in
-                    if !drag.active { drag.active = true; drag.grab = g.startLocation.y }
-                    // Every 4 points dragged = one line; up = back in history, like a thumb.
-                    let notches = Int((drag.grab - g.location.y) / 4)
-                    if notches != 0 {
-                        store.scrollPane(key, lines: notches)
-                        drag.grab -= CGFloat(notches) * 4
-                        drag.paging = true   // moved: not a click
-                    }
-                }
-                .onEnded { g in
-                    if !drag.paging, g.startLocation.y > 18, g.startLocation.y < h - 18 {
-                        store.scrollPane(key, pages: g.startLocation.y < h / 2 ? 1 : -1)
-                    }
-                    drag.active = false; drag.paging = false
-                })
-            .help("This app is full-screen and keeps its own history. Scroll here or with the wheel; ▲/▼ page.")
+            .frame(width: 10)
+            Button { store.scrollPages(key, -1) } label: { Image(systemName: "chevron.down") }
+                .help("Page down")
         }
+        .buttonStyle(.borderless)
+        .font(.system(size: 9, weight: .bold))
+        .frame(width: 14)
+        .padding(.vertical, 4)
+        .disabled(!active)
+        .help(active ? "Scroll this app's own history (wheel/trackpad works too)" : "Nothing to scroll yet")
     }
 }
 
@@ -953,10 +1280,52 @@ final class ScrollPoller: ObservableObject {
     private var timer: Timer?
     func start(store: SessionStore, key: String) {
         stop()
-        Task { await store.refreshScrollInfo(key) }
+        Task<Void, Never> { await store.refreshScrollInfo(key) }
         timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in
             MainActor.assumeIsolated { _ = Task<Void, Never> { await store.refreshScrollInfo(key) } }
         }
     }
     func stop() { timer?.invalidate(); timer = nil }
 }
+
+@MainActor
+final class HoverState: ObservableObject { @Published var on = false }
+
+/// F8: a host's listening ports (collapsed), each forwardable to localhost on this Mac.
+struct PortsNode: View {
+    @EnvironmentObject var store: SessionStore
+    var host: String
+    @StateObject private var ui = PortsNodeModel()
+
+    var body: some View {
+        let rows = store.portRows(host)
+        let fwd = rows.filter { $0.forward != nil }.count
+        DisclosureGroup(isExpanded: $ui.expanded) {
+            ForEach(rows) { r in
+                HStack(spacing: 6) {
+                    Text(verbatim: "\(r.remote)").font(.callout.monospacedDigit())
+                    Text([r.port?.process, r.owner?.name].compactMap { $0 }.joined(separator: " · "))
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Spacer(minLength: 4)
+                    if let f = r.forward {
+                        Text(verbatim: "→ :\(f.local)").font(.caption.monospacedDigit())
+                        Button("Open") { NSWorkspace.shared.open(URL(string: "http://localhost:\(f.local)/")!) }
+                            .disabled(!r.listening)
+                        Button("Stop") { Task { do { try await store.unforward(host: host, port: r.remote) } catch { Actions.report(store, error) } } }
+                    } else {
+                        Button("Forward") { Task { do { try await store.forward(host: host, port: r.remote) } catch { Actions.report(store, error) } } }
+                    }
+                }
+                .buttonStyle(.borderless)
+                .opacity(r.listening ? 1 : 0.45)
+                .help(r.listening ? "localhost on this Mac only" : "Not listening right now; the forward stays until you stop it")
+            }
+        } label: {
+            Label(fwd > 0 ? "Ports (\(rows.count), \(fwd) forwarded)" : "Ports (\(rows.count))", systemImage: "point.3.connected.trianglepath.dotted")
+                .font(.callout).foregroundStyle(.secondary)
+        }
+    }
+}
+
+@MainActor
+final class PortsNodeModel: ObservableObject { @Published var expanded = false }

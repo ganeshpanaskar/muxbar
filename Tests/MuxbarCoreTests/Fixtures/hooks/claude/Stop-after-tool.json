@@ -1,0 +1,15 @@
+{
+ "session_id": "44444444-dddd-4ddd-8ddd-444444444444",
+ "transcript_path": "/Users/u/.claude/projects/-private-tmp-muxbar-e2e-hooks/44444444-dddd-4ddd-8ddd-444444444444.jsonl",
+ "cwd": "/private/tmp/muxbar-e2e-hooks",
+ "prompt_id": "77777777-aaaa-4aaa-8aaa-777777777777",
+ "permission_mode": "default",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "Stop",
+ "stop_hook_active": false,
+ "last_assistant_message": "Wed Oct 14 14:00:48 PDT 2026",
+ "background_tasks": [],
+ "session_crons": []
+}

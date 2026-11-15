@@ -1,0 +1,58 @@
+#!/bin/sh
+# Muxbar status hook for Claude Code and Codex. The agent runs it on lifecycle events; it records
+# the pane's state (working / waiting / idle / ended) in a small file Muxbar reads on each poll:
+#   ${MUXBAR_STATE_DIR:-$HOME/.muxbar/state}/<tmux-socket-name>@<pane>.json
+# It never prints, never fails and never blocks the agent: no output, always exit 0. One awk pass
+# does the work (two processes per event), because agents run hooks around every tool call.
+#   muxbar-hook claude|codex <EventName>   (payload JSON on stdin)
+AGENT=${1:-claude}
+EV=${2:-}
+if [ -z "$TMUX_PANE" ] || [ -z "$TMUX" ]; then cat >/dev/null 2>&1; exit 0; fi
+SD=${MUXBAR_STATE_DIR:-$HOME/.muxbar/state}
+[ -d "$SD" ] || (umask 077; mkdir -p "$SD") 2>/dev/null || { cat >/dev/null 2>&1; exit 0; }
+S=${TMUX%%,*}; S=${S##*/}
+F="$SD/$S@${TMUX_PANE#%}.json"
+umask 077
+if awk -v agent="$AGENT" -v ev="$EV" -v pane="$TMUX_PANE" -v lf="${MUXBAR_HOOK_LOG:-}" '
+  { p = p $0 " " }
+  # First "key": "value" for a key; the value stays JSON-escaped.
+  function get(k,   re, s) {
+    re = "\"" k "\"[ \t]*:[ \t]*\"([^\"\\\\]|\\\\.)*\""
+    if (!match(p, re)) return ""
+    s = substr(p, RSTART, RLENGTH); sub("^\"" k "\"[ \t]*:[ \t]*\"", "", s)
+    return substr(s, 1, length(s) - 1)
+  }
+  # A short, quote-free start of a reply, safe to put back into JSON.
+  function clean(s) {
+    gsub(/\\[nrt]/, " ", s); gsub(/\\"/, "\047", s); gsub(/\\\\/, "/", s)
+    gsub(/\\u[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]/, "?", s); gsub(/["\\]/, "", s)
+    return substr(s, 1, 300)
+  }
+  END {
+    if (ev == "") ev = get("hook_event_name")
+    srand(); now = srand()
+    if (lf != "") print now " " agent " " ev " " p >> lf
+    st = ""; rs = ""; rp = ""
+    if (ev == "SessionStart") { st = "idle"; rs = get("source") }
+    else if (ev == "UserPromptSubmit" || ev == "PostToolUse" || ev == "PreCompact") st = "working"
+    else if (ev == "PreToolUse") { if (get("tool_name") == "AskUserQuestion") { st = "waiting"; rs = "question" } else st = "working" }
+    else if (ev == "PermissionRequest") { st = "waiting"; rs = "permission" }
+    else if (ev == "Notification") {
+      nt = get("notification_type"); msg = get("message")
+      if (nt == "permission_prompt" || msg ~ /permission/) { st = "waiting"; rs = "permission" }
+      else if (nt ~ /^elicitation/ || msg ~ /question/) { st = "waiting"; rs = "question" }
+      else if (nt == "idle_prompt" || msg ~ /waiting for your input/) { st = "idle"; rs = "idle_prompt" }
+    }
+    else if (ev == "Stop") { st = "idle"; rs = "done"; rp = clean(get("last_assistant_message")) }
+    else if (ev == "Interrupt") { st = "idle"; rs = "interrupted" }
+    else if (ev == "PostCompact") st = (get("trigger") == "manual") ? "idle" : "working"
+    else if (ev == "SessionEnd") st = "ended"
+    if (st == "") exit 1
+    printf "{\"v\":1,\"agent\":\"%s\",\"pane\":\"%s\",\"event\":\"%s\",\"state\":\"%s\",\"reason\":\"%s\",\"sid\":\"%s\",\"transcript\":\"%s\",\"cwd\":\"%s\",\"reply\":\"%s\",\"ts\":%d}\n", \
+      agent, pane, ev, st, rs, get("session_id"), get("transcript_path"), get("cwd"), rp, now
+  }' > "$F.$$" 2>/dev/null; then
+  mv -f "$F.$$" "$F" 2>/dev/null
+else
+  rm -f "$F.$$" 2>/dev/null
+fi
+exit 0

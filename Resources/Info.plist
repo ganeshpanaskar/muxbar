@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>io.github.ganeshpanaskar.muxbar</string>
+    <string>@BUNDLE_ID@</string>
     <key>CFBundleName</key>
-    <string>Muxbar</string>
+    <string>@NAME@</string>
     <key>CFBundleDisplayName</key>
-    <string>Muxbar</string>
+    <string>@NAME@</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleExecutable</key>
@@ -22,6 +22,20 @@
     <string>14.5</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>A program running in one of your Muxbar sessions (for example Claude Code or a shell command) wants to access files in your Desktop folder.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>A program running in one of your Muxbar sessions (for example Claude Code or a shell command) wants to access files in your Documents folder.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>A program running in one of your Muxbar sessions (for example Claude Code or a shell command) wants to access files in your Downloads folder.</string>
+    <key>NSAppleMusicUsageDescription</key>
+    <string>A program running in one of your Muxbar sessions (for example Claude Code or a shell command) touched your Music folder, which holds the Apple Music library.</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>A program running in one of your Muxbar sessions (for example Claude Code or a shell command) touched your Pictures folder, which holds the Photos library.</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>A program running in one of your Muxbar sessions (for example Claude Code or a shell command) wants to access files on a removable drive.</string>
+    <key>NSNetworkVolumesUsageDescription</key>
+    <string>A program running in one of your Muxbar sessions (for example Claude Code or a shell command) wants to access files on a network drive.</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>Muxbar opens, focuses and names Terminal/iTerm2 windows for your sessions. It never reads or types into them except to start or reattach a session.</string>
 </dict>

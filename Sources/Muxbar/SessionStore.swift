@@ -20,11 +20,63 @@ final class SessionStore: ObservableObject {
     @Published private(set) var pollingActive = true
     @Published private(set) var lastRefresh: [String: Date] = [:]
     @Published private(set) var tmuxVersions: [String: String] = [:]
+    /// Host/group to prefill in the New Session window (set by "New Session in Group…").
+    @Published var newSessionPrefill: (host: String, group: String?)?
     /// When each waiting session started waiting (for oldest-first ordering).
     @Published private(set) var waitingSince: [String: Date] = [:]
     /// Session shown in the main window's terminal pane.
     @Published private(set) var selectedKey: String?
+    /// F10: the grid tile that gets keystrokes.
+    @Published var focusedTile: String?
+    /// F7: the ⌘K palette is showing (with this query when opened from the CLI).
+    @Published var switcherOpen = false
+    var switcherQuery = ""
+    /// Sessions whose first prompt was already looked up (key + conversation id).
+    var firstPromptTried: Set<String> = []
+    /// F10: when each visible (not focused) grid tile came on screen while unread; tiles marked
+    /// unread by hand while visible stay unread until they leave the screen.
+    var tileViewStart: [String: Date] = [:]
+    var gridSticky: Set<String> = []
+    /// F8: forwardable listening ports per Linux host (from the last probe), and hosts whose
+    /// forwards are being set up again.
+    @Published var hostPorts: [String: [ListeningPort]] = [:]
+    /// F9: a search the History window should run (from the CLI; the window clears it).
+    @Published var historyRequest: (query: String, host: String, claudeRoot: String?, codexRoot: String?)?
+    var forwardingInFlight: Set<String> = []
+    // F2 attention state (not persisted).
+    var trackers: [String: Unread.Tracker] = [:]
+    var viewStart: [String: Date] = [:]
+    var keepUnreadUntilLeft: String?
+    /// Test hook: whether Muxbar counts as frontmost (test instances never activate: default yes).
+    var viewingOverride: Bool? = TestEnv.isTest ? true : nil
+    private var viewTimer: Timer?
+    // F3 memory state.
+    @Published var hostMemory: [String: HostMemory] = [:]
+    @Published var topProcesses: [String: [ProcessUsage]] = [:]
+    /// Host whose memory popover is open (also set by clicking a memory alert).
+    @Published var memoryPopoverHost: String?
+    var memSamples: [String: [MemorySample]] = [:]
+    var memAlerts: [String: MemoryAlerts] = [:]
+    var memPollers: [String: Task<Void, Never>] = [:]
+    var lastPanes: [String: [ProbedPane]] = [:]
+    /// Test hook: thresholds that aren't saved (lowered to trigger alerts without filling memory).
+    var memThresholdOverride: (warn: Int, crit: Int)?
+    // F4: when you last typed in each pane (for auto-sleep), and the auto-sleep timer.
+    var lastInput: [String: Date] = [:]
+    /// F5: shown while a large drop is being copied to a host.
+    @Published var dropProgress: String?
+    /// F11: a fresh install that hasn't been through (or skipped) the setup window yet.
+    @Published var needsSetup = false
+    /// When each session's agent last went idle (screen-based sessions; hooks carry their own time).
+    var idleSinceAt: [String: Int] = [:]
+    private var autoSleepTask: Task<Void, Never>?
     let embedded = EmbeddedTerminals()
+    /// Separate tmux server (`tmux -L`) for test instances; nil = the default server.
+    let tmuxSocket = TestEnv.tmuxSocket
+    /// Folder of the agents' hook state files on every host (tests use their own).
+    let hookDir = TestEnv.value("MUXBAR_HOOK_STATE_DIR").map(shellQuotePath) ?? HostProbe.defaultHookDir
+    /// Status-hook installer (F1); only the user's actions call it.
+    private(set) lazy var hooks = StatusHooks(runner: { [unowned self] in self.runner() })
 
     let stateFile: String
     private var pollers: [String: Task<Void, Never>] = [:]
@@ -56,10 +108,22 @@ final class SessionStore: ObservableObject {
         pendingSelection = state.lastSelected
         // Sessions started outside Muxbar stay in "Others" (never in groups).
         var st = state
+        if st.forgetTestDirs() > 0 { Log.info("removed test folders from recent folders") }
+        if st != state {
+            state = st
+            try? Persistence.save(st, path: stateFile)
+        }
         if st.ejectOutsideFromGroups() > 0 {
             state = st
             try? Persistence.save(st, path: stateFile)
             Log.info("moved sessions started outside Muxbar out of groups into Others")
+        }
+        // F11: a fresh install gets the setup window; existing installs are just marked as set up.
+        if state.settings.setupDone == nil {
+            if state.looksFresh { needsSetup = true } else {
+                state.settings.setupDone = true
+                try? Persistence.save(state, path: stateFile)
+            }
         }
         let nc = NSWorkspace.shared.notificationCenter
         observers.append(nc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { _ in
@@ -69,9 +133,19 @@ final class SessionStore: ObservableObject {
             MainActor.assumeIsolated { self.handleWake() }
         })
         startAllPollers()
+        viewTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
+            MainActor.assumeIsolated { self.tickViewing() }
+        }
+        autoSleepTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(SessionStore.autoSleepInterval * 1_000_000_000))
+                guard let self, self.pollingActive else { continue }
+                await self.autoSleepTick()
+            }
+        }
     }
 
-    // MARK: Pane history scrolling (tmux copy mode, or the full-screen app itself; driven from the scroll bar and wheel)
+    // MARK: Pane history scrolling (tmux copy mode, driven from the scroll bar and wheel)
 
     @Published private(set) var scrollInfo: [String: TmuxScrollInfo] = [:]
     private var scrollBusy = Set<String>()
@@ -80,56 +154,151 @@ final class SessionStore: ObservableObject {
     private func scrollTarget(_ key: String) -> (SessionRecord, String, String)? {
         guard let rec = state.sessions[key], !rec.ended, let id = rec.tmuxID else { return nil }
         let tmux = rec.host == localHost ? (localTmux.map(shellQuote) ?? "tmux") : "tmux"
-        return (rec, id, tmux)
+        return (rec, id, TmuxCommands.invocation(tmux, socket: tmuxSocket))
     }
 
     func refreshScrollInfo(_ key: String) async {
         guard let (rec, id, tmux) = scrollTarget(key) else { return }
         let r = await runner().run(host: rec.host, script: TmuxScroll.infoScript(tmux: tmux, id: id), timeout: 10)
-        if let info = TmuxScroll.parse(r.stdout) { scrollInfo[key] = info }
+        if let info = TmuxScroll.parse(r.stdout) { scrollInfo[key] = info; scrollInfoAt[key] = Date() }
     }
 
-    /// Runs scroll commands one at a time per pane; while one is in flight only the latest
-    /// request is kept (drag and wheel produce many).
+    /// Runs scroll commands one at a time per pane, each followed by the pane's new scroll info
+    /// in the same call. Wheel input that arrives meanwhile is added up (`scrollPending`) and sent
+    /// as one command when this one returns; of absolute jumps only the latest is kept.
     private func runScroll(_ key: String, _ make: @escaping () -> String) {
-        guard let (rec, _, _) = scrollTarget(key) else { return }
+        guard let (rec, id, tmux) = scrollTarget(key) else { return }
         if scrollBusy.contains(key) { scrollQueued[key] = make; return }
         scrollBusy.insert(key)
         Task {
-            _ = await runner().run(host: rec.host, script: make() + "; " + TmuxScroll.infoScript(tmux: scrollTarget(key)?.2 ?? "tmux", id: rec.tmuxID ?? ""), timeout: 10)
-            await refreshScrollInfo(key)
+            let r = await runner().run(host: rec.host, script: make() + "; " + TmuxScroll.infoScript(tmux: tmux, id: id), timeout: 10)
+            if let info = TmuxScroll.parse(r.stdout) { scrollInfo[key] = info }
             scrollBusy.remove(key)
-            if let next = scrollQueued.removeValue(forKey: key) { runScroll(key, next) }
+            if let next = scrollQueued.removeValue(forKey: key) { runScroll(key, next) } else { flushScroll(key) }
         }
     }
 
-    func scrollPane(_ key: String, lines: Int) {
-        guard lines != 0, let (_, id, tmux) = scrollTarget(key) else { return }
-        if let info = scrollInfo[key], info.fullscreen {
-            // A full-screen app keeps its own history: hand it the scrolling, one wheel event per
-            // line (Claude Code moves about a line per event).
-            runScroll(key) { TmuxScroll.appScrollScript(tmux: tmux, id: id, ticks: lines, mouse: info.appMouse,
-                                                        col: 10, row: max(1, info.height / 2)) }
+    /// Wheel lines not sent yet, per pane (positive = up).
+    private var scrollPending: [String: Int] = [:]
+    /// Wheel lines per Page Up/Down sent to a full-screen app without mouse reporting.
+    static let linesPerPage = 8
+    /// Wheel lines per wheel event sent to an app with mouse reporting: one, as a terminal sends
+    /// them (Claude Code moves 1–2 lines per event, more in quick bursts).
+    static let linesPerWheelEvent = 1
+
+    private var wheelRemainder: [String: CGFloat] = [:]
+
+    /// Trackpad points per wheel report sent to an app with mouse reporting. Claude Code moves
+    /// about a line per report when they come ≥ 50 ms apart and speeds up when they come faster
+    /// (measured: 1.8 lines per report at 16 ms, more over a long swipe): one report per 8 points
+    /// gives a steady stream of updates while the distance still follows the finger.
+    static let pointsPerWheelReport: CGFloat = 8
+    private var reportRemainder: [String: CGFloat] = [:]
+
+    /// One wheel/trackpad event over a pane (`deltaY` > 0 = back in history). An app with mouse
+    /// reporting (Claude Code's full-screen view) gets wheel reports straight away, through the
+    /// attached client; everything else goes by lines.
+    func scrollWheel(_ key: String, deltaY: CGFloat, precise: Bool) {
+        guard deltaY != 0 else { return }
+        if let info = scrollInfo[key], info.alternate, info.mouse != .off, !scrollBusy.contains(key),
+           let v = embedded.session(key)?.view as? MuxTerminalView {
+            // A mouse notch is 3 lines, one report per line, as before.
+            let acc = (reportRemainder[key] ?? 0) + (precise ? deltaY / Self.pointsPerWheelReport : deltaY * 3)
+            let n = Int(acc.rounded(.towardZero))
+            reportRemainder[key] = acc - CGFloat(n)
+            if n != 0 {
+                let t = v.getTerminal()
+                v.sendGenerated(TmuxScroll.clientWheelBytes(events: n, col: max(1, t.cols / 2), row: max(1, t.rows / 2)))
+            }
+            refreshScrollInfoSoon(key)
             return
         }
-        runScroll(key) { TmuxScroll.scrollScript(tmux: tmux, id: id, lines: lines) }
-        if var i = scrollInfo[key] {   // optimistic, so the thumb follows immediately
+        // Precise (trackpad) deltas are points; classic wheel deltas are lines.
+        let acc = (wheelRemainder[key] ?? 0) + (precise ? deltaY / 16 : deltaY * 3)
+        let lines = Int(acc.rounded(.towardZero))
+        wheelRemainder[key] = acc - CGFloat(lines)
+        if lines != 0 { scrollPane(key, lines: lines) }
+    }
+
+    func scrollPane(_ key: String, lines: Int) {
+        guard lines != 0, scrollTarget(key) != nil else { return }
+        scrollPending[key, default: 0] += lines
+        if var i = scrollInfo[key], i.usesTmuxHistory {   // optimistic, so the thumb follows immediately
             i.inMode = true
             i.position = min(i.history, max(0, i.position + lines))
             if i.position == 0 { i.inMode = false }
             scrollInfo[key] = i
         }
+        flushScroll(key)
     }
 
-    /// Pages up (positive) or down: Page Up/Down keys for a full-screen app, else a screenful of
-    /// tmux history.
-    func scrollPane(_ key: String, pages: Int) {
-        guard pages != 0, let (_, id, tmux) = scrollTarget(key) else { return }
-        if let info = scrollInfo[key], info.fullscreen {
-            runScroll(key) { TmuxScroll.appPageScript(tmux: tmux, id: id, pages: pages) }
-        } else {
-            scrollPane(key, lines: pages * max(1, (scrollInfo[key]?.height ?? 24) - 2))
+    /// Sends the pending wheel lines the way this pane's app takes them: tmux history (copy mode),
+    /// wheel events (mouse reporting), or Page Up / Page Down. Remainders wait for more input.
+    private func flushScroll(_ key: String) {
+        guard !scrollBusy.contains(key), let pending = scrollPending[key], pending != 0,
+              let (_, id, tmux) = scrollTarget(key) else { return }
+        guard let info = scrollInfo[key] else {
+            // Which kind of pane this is decides what to send: learn it first.
+            scrollBusy.insert(key)
+            Task { await refreshScrollInfo(key); scrollBusy.remove(key); flushScroll(key) }
+            return
         }
+        if info.usesTmuxHistory {
+            scrollPending[key] = 0
+            runScroll(key) { TmuxScroll.scrollScript(tmux: tmux, id: id, lines: pending) }
+        } else if info.alternate && info.mouse != .off {
+            let events = pending / Self.linesPerWheelEvent
+            guard events != 0 else { return }
+            scrollPending[key] = pending - events * Self.linesPerWheelEvent
+            if let v = embedded.session(key)?.view as? MuxTerminalView {
+                // Through the attached client, as a terminal sends it: tmux hands it to the app at
+                // once, with no command (or ssh round trip) per step.
+                let t = v.getTerminal()
+                v.sendGenerated(TmuxScroll.clientWheelBytes(events: events, col: max(1, t.cols / 2), row: max(1, t.rows / 2)))
+                refreshScrollInfoSoon(key)
+            } else {
+                let row = max(1, info.height / 2)
+                runScroll(key) { TmuxScroll.wheelScript(tmux: tmux, id: id, events: events, mouse: info.mouse, col: 2, row: row) }
+            }
+        } else if info.alternate {
+            let pages = pending / Self.linesPerPage
+            guard pages != 0 else { return }
+            scrollPending[key] = pending - pages * Self.linesPerPage
+            if let v = embedded.session(key)?.view as? MuxTerminalView {
+                v.sendGenerated(TmuxScroll.clientPageBytes(pages: pages))
+                refreshScrollInfoSoon(key)
+            } else {
+                scrollPages(key, pages)
+            }
+        } else if let t = scrollInfoAt[key], Date().timeIntervalSince(t) < 1 {
+            scrollPending[key] = 0   // plain shell with no history (just checked): nothing to scroll
+            if Date().timeIntervalSince(scrollNoneLogged[key] ?? .distantPast) > 60 {
+                scrollNoneLogged[key] = Date()
+                Log.info("scroll: \(state.sessions[key]?.name ?? key) has nothing to scroll (no tmux history, no full-screen app): \(info)")
+            }
+        } else {
+            // What the pane showed may be stale (e.g. Claude switched to its full-screen view after the
+            // last look): look again, then send what's pending the right way.
+            scrollInfoAt[key] = Date()
+            scrollBusy.insert(key)
+            Task { await refreshScrollInfo(key); scrollBusy.remove(key); flushScroll(key) }
+        }
+    }
+
+    private var scrollInfoAt: [String: Date] = [:]
+    private var scrollNoneLogged: [String: Date] = [:]
+    /// Scrolling sent through the client reads no info back: re-read it now and then, in the
+    /// background, so a pane whose app quit or turned the mouse off is noticed.
+    private func refreshScrollInfoSoon(_ key: String) {
+        if let t = scrollInfoAt[key], Date().timeIntervalSince(t) < 3 { return }
+        scrollInfoAt[key] = Date()
+        Task { await refreshScrollInfo(key) }
+    }
+
+    /// Page Up (positive) / Page Down (negative) to the app in the pane.
+    func scrollPages(_ key: String, _ pages: Int) {
+        guard pages != 0, let (_, id, tmux) = scrollTarget(key) else { return }
+        runScroll(key) { TmuxScroll.pageKeysScript(tmux: tmux, id: id, pages: pages) }
     }
 
     func scrollPane(_ key: String, toPosition pos: Int) {
@@ -140,7 +309,7 @@ final class SessionStore: ObservableObject {
 
     /// Before typed keys reach a scrolled-back pane, return it to live output.
     func leaveHistoryThen(_ key: String, _ deliver: @escaping () -> Void) -> Bool {
-        guard let info = scrollInfo[key], !info.atLive, let (rec, id, tmux) = scrollTarget(key) else { return false }
+        guard let info = scrollInfo[key], info.inMode, !info.atLive, let (rec, id, tmux) = scrollTarget(key) else { return false }
         scrollInfo[key]?.inMode = false
         scrollInfo[key]?.position = 0
         Task {
@@ -167,30 +336,31 @@ final class SessionStore: ObservableObject {
         if let sel = pendingSelection, state.sessions[sel]?.host == host {
             pendingSelection = nil
             if let rec = state.sessions[sel], !rec.ended { select(sel) }
+            if state.layout == .grid, gridKeys.contains(sel) { focusedTile = sel }
         }
     }
 
     // MARK: Resume ended sessions
 
     /// Brings back a session whose tmux session ended (e.g. after a reboot): same folder, name,
-    /// group and section, running its agent's resume command for the known conversation (e.g.
-    /// `claude --resume <id>`), else its continue command (`claude --continue`).
+    /// group and section, continuing its agent's conversation — the exact id the hooks recorded,
+    /// else (Claude) the newest conversation for that folder, else the agent's "continue last".
     @discardableResult
     func resumeEnded(key: String) async throws -> SessionRecord {
         guard let old = state.sessions[key] else { throw StoreError("Session not found") }
         guard old.ended else { throw StoreError("\(old.name) is still running") }
         let folder = old.managedDir ?? old.path ?? "~"
-        // Known conversation id, else the newest conversation whose folder matches (by real path).
-        var agent = state.settings.agent(id: old.agent)
-        var convID = old.conversationID
-        if convID == nil, let found = await newestConversation(host: old.host, folder: folder, agent: agent?.id) {
-            convID = found.id
-            agent = agent ?? state.settings.agent(id: found.agent)
+        let agent = old.agent ?? .claude
+        var convID = old.resumeID
+        if convID == nil && agent == .claude {
+            convID = await newestConversation(host: old.host, folder: folder)
         }
-        // Unknown agent (e.g. the session was a plain shell): fall back to the default command's agent.
-        agent = agent ?? state.settings.defaultAgent
-        let cmd: String? = agent.map { Conversations.resumeEndedCommand(agent: $0, sessionID: convID) }
-            ?? (state.settings.defaultCommand.isEmpty ? nil : state.settings.defaultCommand)
+        let cmd: String
+        if let id = convID, ClaudeConversations.isValidSessionID(id) {
+            cmd = AgentAdapter.resumeCommand(agent, sessionID: id, cwd: agent == .codex ? folder : nil, flags: [])
+        } else {
+            cmd = agent == .codex ? "codex resume --last" : "claude --continue"
+        }
         // Free the name first so the new session gets it back.
         mutate { $0.sessions[key] = nil }
         do {
@@ -198,14 +368,15 @@ final class SessionStore: ObservableObject {
             try await runOnHost(old.host, Workspace.mkdirScript(folder), what: "recreate session folder")
             var rec = try await newSession(host: old.host, dir: folder, name: old.name, command: cmd, group: group)
             rec.managedDir = old.managedDir   // same workspace folder as before (still follows renames)
-            rec.conversationID = convID
-            rec.agent = agent?.id
+            rec.agent = agent
+            rec.agentSessionID = convID
+            if agent == .claude { rec.claudeSessionID = convID }
             rec.origin = old.isOutside ? .outside : .muxbar   // Others stay in Others
             rec.note = old.note
             rec.tags = old.tags
             let saved = rec
             mutate { $0.sessions[saved.key] = saved }
-            Log.info("resumed ended session \(old.name) on \(old.host) with: \(cmd ?? "a shell")")
+            Log.info("resumed ended session \(old.name) on \(old.host) with: \(cmd)")
             return saved
         } catch {
             mutate { $0.sessions[key] = old }   // put the ended record back
@@ -213,13 +384,13 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    /// Newest conversation recorded for `folder` on `host`, of `agent` if given (agents store the
-    /// real path, e.g. /private/tmp/… for /tmp/…, so both spellings are compared).
-    private func newestConversation(host: String, folder: String, agent: String?) async -> Conversation? {
+    /// Newest Claude conversation recorded for `folder` on `host` (Claude stores the real path,
+    /// e.g. /private/tmp/… for /tmp/…, so both spellings are compared).
+    func newestConversation(host: String, folder: String) async -> String? {
         let r = await runner().run(host: host, script: "cd \(shellQuotePath(folder)) 2>/dev/null && pwd -P && pwd", timeout: 15)
         let paths = Set(r.stdout.split(separator: "\n").map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
         guard !paths.isEmpty, let list = try? await conversations(host: host, limit: 200) else { return nil }
-        return list.first { c in (agent == nil || c.agent == agent) && (c.cwd.map { paths.contains($0) } ?? false) }   // newest first
+        return list.first { c in c.cwd.map { paths.contains($0) } ?? false }?.id   // list is newest first
     }
 
     // MARK: Needs input
@@ -240,10 +411,11 @@ final class SessionStore: ObservableObject {
         sessions(inGroup: group, host: host).filter { status(of: $0) == .waiting }.count
     }
 
-    /// ⌘J: the next waiting session after the selected one (oldest first, wrapping round).
+    /// ⌘J: the next session in the Inbox after the selected one — waiting ones (oldest first), then
+    /// finished and unread (newest first) — wrapping round.
     @discardableResult
     func focusNextWaiting() async throws -> SessionRecord? {
-        let list = waitingSessions
+        let list = inbox
         guard !list.isEmpty else { return nil }
         let next: SessionRecord
         if let cur = selectedKey, let i = list.firstIndex(where: { $0.key == cur }) {
@@ -271,11 +443,13 @@ final class SessionStore: ObservableObject {
 
     var localTmux: String? { state.settings.disableLocalTmux ? nil : findLocalTmux() }
 
-    var interval: TimeInterval { openViews > 0 ? Self.foregroundInterval : Self.backgroundInterval }
+    /// Test instances poll faster (`MUXBAR_FAST_POLL` seconds) to measure status lag.
+    private let fastPoll = TestEnv.value("MUXBAR_FAST_POLL").flatMap(TimeInterval.init)
+    var interval: TimeInterval { fastPoll ?? (openViews > 0 ? Self.foregroundInterval : Self.backgroundInterval) }
 
     // MARK: Persistence
 
-    private func mutate(_ f: (inout AppState) -> Void) {
+    func mutate(_ f: (inout AppState) -> Void) {
         var s = state
         f(&s)
         guard s != state else { return }
@@ -354,6 +528,14 @@ final class SessionStore: ObservableObject {
         if inFlight[host]?.generation == gen { inFlight[host] = nil }
     }
 
+    /// The status-probe script for `host` and its nonce (also used by the benchmark test hook).
+    func probeScript(host: String, mode: HostProbe.Mode = .status) -> (String, String)? {
+        if host == localHost && localTmux == nil { return nil }
+        let tmux = host == localHost ? shellQuote(localTmux!) : "tmux"
+        let nonce = HostProbe.makeNonce()
+        return (HostProbe.script(mode: mode, nonce: nonce, tmux: tmux, socket: tmuxSocket, hookDir: hookDir), nonce)
+    }
+
     private func performRefresh(host: String) async {
         guard state.hosts.contains(host) else { return }
 
@@ -365,10 +547,8 @@ final class SessionStore: ObservableObject {
                 return
             }
         }
-        let tmux = host == localHost ? shellQuote(localTmux!) : "tmux"
-        let nonce = HostProbe.makeNonce()
-        let r = await runner().run(host: host, script: HostProbe.script(mode: .status, nonce: nonce, tmux: tmux),
-                                   timeout: 20)
+        guard let (script, nonce) = probeScript(host: host) else { return }
+        let r = await runner().run(host: host, script: script, timeout: 20)
         lastRefresh[host] = Date()
         guard state.hosts.contains(host) else { return }
         if !r.ok {
@@ -389,6 +569,8 @@ final class SessionStore: ObservableObject {
             if probe.tmuxMissing { health[host] = .tmuxMissing; return }
             if let v = probe.tmuxVersion, !tmuxVersionSupported(v) { health[host] = .tmuxTooOld(v); return }
             health[host] = .ok
+            lastPanes[host] = probe.panes
+            if let m = probe.memory { recordMemory(host: host, m) }
             var newLive: [String: LiveInfo] = [:]
             mutate { st in newLive = Reconciler.apply(probe, host: host, to: &st) }
             var l = live.filter { k, _ in state.sessions[k]?.host != host }
@@ -398,8 +580,12 @@ final class SessionStore: ObservableObject {
             for (k, v) in l where state.sessions[k]?.host == host {
                 if v.status == .waiting { if waitingSince[k] == nil { waitingSince[k] = Date() } } else { waitingSince[k] = nil }
             }
-            Attention.shared.update(store: self, before: before, after: l)
+            clearSleepIfAgentBack(host: host)
+            let events = processAttention(host: host, before: before, after: l)
+            Attention.shared.update(store: self, before: before, after: l, events: events)
             restorePanes(host: host)
+            if let p = probe.ports, host != localHost { updatePorts(host: host, p) }
+            ensureForwards(host: host)
         } catch {
             failures[host, default: 0] += 1
             Log.error("probe \(host) output unparseable: \(error)")
@@ -407,11 +593,10 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    /// L1: plain local tabs (no tmux). Liveness = an agent process on the tab's tty.
+    /// L1: plain local tabs (no tmux). Liveness = a claude process on the tab's tty.
     private func refreshPlainTabs() {
         let plain = state.sessions.values.filter { $0.host == localHost && $0.isPlainTab }
         guard !plain.isEmpty else { return }
-        let agents = state.settings.agents
         Task {
             for rec in plain {
                 if let e = embedded.session(rec.key) {
@@ -420,7 +605,7 @@ final class SessionStore: ObservableObject {
                 }
                 guard let tty = rec.tab?.tty else { continue }
                 let r = await runProcess("/bin/ps", ["-o", "comm=", "-t", (tty as NSString).lastPathComponent], timeout: 5)
-                let running = r.stdout.split(separator: "\n").map(String.init).contains { StatusClassifier.isAgentProcess($0, agents: agents) }
+                let running = r.stdout.split(separator: "\n").map(String.init).contains(where: StatusClassifier.isClaudeProcess)
                 live[rec.key] = LiveInfo(status: running ? .running : .notRunning, attached: 1, command: nil)
             }
         }
@@ -441,6 +626,8 @@ final class SessionStore: ObservableObject {
 
     func removeHost(_ host: String) {
         guard host != localHost else { return }
+        dropForwards(host: host)
+        hostPorts[host] = nil
         pollers[host]?.cancel()
         pollers[host] = nil
         health[host] = nil
@@ -454,6 +641,7 @@ final class SessionStore: ObservableObject {
     func updateSettings(_ f: (inout AppSettings) -> Void) {
         mutate { f(&$0.settings) }
         settingsGeneration += 1
+        applyMousePolicy()
         refreshAll()
     }
 
@@ -477,10 +665,12 @@ final class SessionStore: ObservableObject {
     /// Executable + args that attach to a tmux session (run inside the built-in pane).
     private func attachProcess(_ rec: SessionRecord) -> (String, [String]) {
         let id = rec.tmuxID ?? ""
-        if rec.host == localHost { return (localTmux ?? "/usr/bin/false", ["attach-session", "-t", id]) }
+        if rec.host == localHost {
+            return (localTmux ?? "/usr/bin/false", (tmuxSocket.map { ["-L", $0] } ?? []) + ["attach-session", "-t", id])
+        }
         var args: [String] = []
         if let f = state.settings.sshConfigFile { args += ["-F", f] }
-        args += ["-t", rec.host, "tmux attach-session -t " + shellQuote(id)]
+        args += ["-t", rec.host, TmuxCommands.remoteAttach(id: id, socket: tmuxSocket)]
         return ("/usr/bin/ssh", args)
     }
 
@@ -497,9 +687,19 @@ final class SessionStore: ObservableObject {
     @discardableResult
     func select(_ key: String?) -> FocusOutcome? {
         defer { rememberPanes() }
-        guard let key, let rec = state.sessions[key] else { selectedKey = key; return nil }
+        guard let key, state.sessions[key] != nil else { selectedKey = key; return nil }
         selectedKey = key
-        guard !rec.ended else { return nil }
+        mutate { $0.sessions[key]?.lastViewedAt = Int(Date().timeIntervalSince1970) }
+        return attachPane(key)
+    }
+
+    /// The sidebar selection without attaching (a grid tile that's already open).
+    func setSelection(_ key: String?) { selectedKey = key }
+
+    /// Opens (attaches) a session's built-in pane without changing the selection; grid tiles use it.
+    @discardableResult
+    func attachPane(_ key: String) -> FocusOutcome? {
+        guard let rec = state.sessions[key], !rec.ended else { return nil }
         if rec.isPlainTab {
             if embedded.session(key) == nil, rec.tab == nil {
                 let cmd = "cd \(shellQuotePath(rec.path ?? "~")) && exec \"${SHELL:-/bin/zsh}\" -l"
@@ -519,12 +719,31 @@ final class SessionStore: ObservableObject {
         return outcome
     }
 
-    func wireScrolling(_ key: String) {
-        guard let v = embedded.session(key)?.view as? MuxTerminalView else { return }
-        v.beforeInput = { [weak self] deliver in self?.leaveHistoryThen(key, deliver) ?? false }
+    /// Mouse policy for every pane: Muxbar keeps the mouse (selection + ⌘C) unless the user lets
+    /// apps have it; holding ⌥ always gives selection back.
+    func applyMousePolicy(optionDown: Bool = NSEvent.modifierFlags.contains(.option)) {
+        let pass = state.settings.passMouseToApps && !optionDown
+        for e in embedded.sessions.values { e.view.allowMouseReporting = pass }
     }
 
-    private func runTmux(host: String, _ script: String) async throws -> String {
+    func wireScrolling(_ key: String) {
+        embedded.session(key)?.view.allowMouseReporting = state.settings.passMouseToApps && !NSEvent.modifierFlags.contains(.option)
+        guard let v = embedded.session(key)?.view as? MuxTerminalView else { return }
+        v.beforeInput = { [weak self] deliver in
+            self?.lastInput[key] = Date()
+            return self?.leaveHistoryThen(key, deliver) ?? false
+        }
+        v.onDrop = { [weak self] urls in
+            guard let self else { return }
+            Task { @MainActor in
+                do { try await self.drop(key, files: urls) } catch let e as DropError where e.message.contains("confirm") {
+                    if Actions.confirmLargeDrop(e.message) { _ = try? await self.drop(key, files: urls, confirmed: true) }
+                } catch { self.banner = error.localizedDescription }
+            }
+        }
+    }
+
+    func runTmux(host: String, _ script: String) async throws -> String {
         let r = await runner().run(host: host, script: script, timeout: 20)
         guard r.ok else {
             let msg = cleanSSHStderr(r.stderr)
@@ -534,15 +753,17 @@ final class SessionStore: ObservableObject {
         return r.stdout
     }
 
-    private func tmuxPath(_ host: String) throws -> String {
-        if host != localHost { return "tmux" }
+    /// tmux as shell text for scripts on `host` (quoted local path, plus `-L` on test instances).
+    func tmuxPath(_ host: String) throws -> String {
+        if host != localHost { return TmuxCommands.invocation("tmux", socket: tmuxSocket) }
         guard let t = localTmux else { throw StoreError("tmux isn't installed locally") }
-        return shellQuote(t)
+        return TmuxCommands.invocation(shellQuote(t), socket: tmuxSocket)
     }
 
     private func attachCommand(_ rec: SessionRecord) -> String {
-        if rec.host == localHost { return TmuxCommands.attachLocal(tmux: localTmux ?? "tmux", id: rec.tmuxID ?? "") }
-        return TmuxCommands.attachRemote(host: rec.host, id: rec.tmuxID ?? "", sshConfigFile: state.settings.sshConfigFile)
+        if rec.host == localHost { return TmuxCommands.attachLocal(tmux: localTmux ?? "tmux", id: rec.tmuxID ?? "", socket: tmuxSocket) }
+        return TmuxCommands.attachRemote(host: rec.host, id: rec.tmuxID ?? "", sshConfigFile: state.settings.sshConfigFile,
+                                         socket: tmuxSocket)
     }
 
     private func terminalCall<T>(_ f: () throws -> T) throws -> T {
@@ -559,7 +780,7 @@ final class SessionStore: ObservableObject {
 
     @discardableResult
     func newSession(host: String, dir: String, name rawName: String, command: String?, group: String? = nil,
-                    attach: Bool = true) async throws -> SessionRecord {
+                    attach: Bool = true, createFolder: Bool = false) async throws -> SessionRecord {
         guard state.hosts.contains(host) else { throw StoreError("Unknown host \(host)") }
         if let g = group, !state.hasGroup(g, host: host) {
             throw StoreError("No group '\(g)' on \(hostLabel(host)) — groups belong to one host")
@@ -572,7 +793,6 @@ final class SessionStore: ObservableObject {
         while taken.contains(name) { name = "\(base)-\(n)"; n += 1 }
         // No command = a plain login shell; the user runs whatever they like in it.
         let cmd: String? = (command?.trimmingCharacters(in: .whitespaces).isEmpty == false) ? command : nil
-        let agent = AgentProfile.matching(command: cmd, in: state.settings.agents)?.id
         // No folder given → the session's workspace folder <root>/<group>/<name>, created now.
         let requested = dir
         var managed: String?
@@ -584,6 +804,9 @@ final class SessionStore: ObservableObject {
             dir = p
         } else {
             dir = requested
+            // A folder typed in New Session that doesn't exist yet is made first (shown as
+            // "will be created" there).
+            if createFolder { try await runOnHost(host, Workspace.mkdirScript(requested), what: "create folder \(requested)") }
         }
 
         if host == localHost && localTmux == nil {
@@ -601,18 +824,20 @@ final class SessionStore: ObservableObject {
             rec.group = group
             rec.managedDir = managed
             rec.origin = .muxbar
-            rec.agent = agent
             mutate { $0.sessions[key] = rec; $0.rememberDir(dir, host: host) }
             if useEmbedded {
                 let line = "cd \(shellQuotePath(dir)) && \(run)exec \"${SHELL:-/bin/zsh}\" -l"
                 _ = embedded.ensure(key: key, executable: "/bin/zsh", args: ["-lc", line])
+                wireScrolling(key)
                 selectedKey = key
                 MainWindowPresenter.show()
             }
             return rec
         }
 
-        let out = try await runTmux(host: host, TmuxCommands.newSession(tmux: try tmuxPath(host), name: name, dir: dir, command: cmd))
+        // A test instance's agents report to its own hook folder, never the user's.
+        let paneCmd = TestEnv.value("MUXBAR_HOOK_STATE_DIR").map { "env MUXBAR_STATE_DIR=\(shellQuotePath($0)) " + (cmd ?? "\"${SHELL:-/bin/sh}\" -l") } ?? cmd
+        let out = try await runTmux(host: host, TmuxCommands.newSession(tmux: try tmuxPath(host), name: name, dir: dir, command: paneCmd))
         guard let id = out.split(separator: "\n").last.map({ $0.trimmingCharacters(in: .whitespaces) }), id.hasPrefix("$") else {
             throw StoreError("tmux didn't return a session id")
         }
@@ -624,7 +849,6 @@ final class SessionStore: ObservableObject {
         rec.group = group
         rec.managedDir = managed
         rec.origin = .muxbar
-        rec.agent = agent
         let created = rec
         mutate { $0.sessions[created.key] = created }
         if attach && useEmbedded {
@@ -645,7 +869,7 @@ final class SessionStore: ObservableObject {
         // Workspace folder follows the name. Move first: if the target exists, nothing changes.
         var newDir: String?
         if let old = rec.managedDir {
-            let target = Workspace.path(root: workspaceRoot(rec.host), group: rec.group, session: name)
+            let target = Workspace.path(root: ownRoot(rec, old), group: rec.group, session: name)
             try await runOnHost(rec.host, Workspace.moveScript(from: old, to: target), what: "rename workspace folder")
             newDir = target
         }
@@ -680,6 +904,10 @@ final class SessionStore: ObservableObject {
         if useEmbedded {
             let outcome = select(key) ?? .focused
             MainWindowPresenter.show()
+            // Opening a sleeping session wakes its agent (Settings → Wake when opened).
+            if rec.sleep != nil && settings.wakeOnOpen {
+                Task { do { try await self.wake(key) } catch { self.banner = error.localizedDescription } }
+            }
             return outcome
         }
         let d = driver()
@@ -692,7 +920,7 @@ final class SessionStore: ObservableObject {
 
         let attach = attachCommand(rec)
         let ps = await runProcess("/bin/ps", ["-axo", "command="], timeout: 5).stdout
-        let alive = hasLiveAttachClient(psOutput: ps, host: rec.host, tmuxID: rec.tmuxID ?? "")
+        let alive = hasLiveAttachClient(psOutput: ps, host: rec.host, tmuxID: rec.tmuxID ?? "", socket: tmuxSocket)
         var outcome = FocusOutcome.openedNew
 
         if let tab = rec.tab, tab.kind == d.kind, let found = try terminalCall({ try d.locate(tab, title: rec.name) }) {
@@ -717,6 +945,13 @@ final class SessionStore: ObservableObject {
         return outcome
     }
 
+    /// Closes the pane only; the tmux session keeps running and can be reopened from the list.
+    func closePane(key: String) {
+        embedded.remove(key)
+        if selectedKey == key { selectedKey = nil }
+        rememberPanes()
+    }
+
     func kill(key: String) async throws {
         guard let rec = state.sessions[key] else { throw StoreError("Session not found") }
         embedded.remove(key)
@@ -724,6 +959,7 @@ final class SessionStore: ObservableObject {
         defer { rememberPanes() }
         if let id = rec.tmuxID, !rec.ended {
             _ = try await runTmux(host: rec.host, TmuxCommands.kill(tmux: try tmuxPath(rec.host), id: id))
+            Log.info("killed \(rec.name) (\(id)) on \(rec.host)")
         }
         mutate { $0.sessions[key] = nil }
         live[key] = nil
@@ -747,18 +983,33 @@ final class SessionStore: ObservableObject {
         guard state.hasGroup(old, host: host) else { throw StoreError("No group '\(old)' on \(hostLabel(host))") }
         guard !name.isEmpty else { throw StoreError("Group name can't be empty") }
         guard name == old || !state.hasGroup(name, host: host) else { throw StoreError("Group '\(name)' already exists on \(hostLabel(host))") }
-        // The group folder follows the name (only if any member lives in a workspace folder).
-        let root = workspaceRoot(host)
-        let oldPath = Workspace.groupPath(root: root, group: old), newPath = Workspace.groupPath(root: root, group: name)
-        let managedMembers = state.sessions.values.contains { $0.host == host && $0.group == old && $0.managedDir != nil }
-        if managedMembers && oldPath != newPath {
-            try await runOnHost(host, Workspace.moveScript(from: oldPath, to: newPath), what: "rename group folder")
+        // The group folder follows the name (only where members live in workspace folders). Members
+        // made under an earlier root keep it, so there can be one group folder per root.
+        let roots = Set(state.sessions.values.compactMap { r -> String? in
+            guard r.host == host, r.group == old, let d = r.managedDir else { return nil }
+            return Workspace.rootOf(managedDir: d, group: old)
+        }).sorted()
+        var moved: [(from: String, to: String)] = []
+        for root in roots {
+            let from = Workspace.groupPath(root: root, group: old), to = Workspace.groupPath(root: root, group: name)
+            guard from != to else { continue }
+            do {
+                try await runOnHost(host, Workspace.moveScript(from: from, to: to), what: "rename group folder")
+                moved.append((from, to))
+            } catch {
+                for m in moved.reversed() {   // all or nothing
+                    try? await runOnHost(host, Workspace.moveScript(from: m.to, to: m.from), what: "undo group folder rename")
+                }
+                throw error
+            }
         }
         mutate { st in
             st.groups[host] = st.groups(for: host).map { $0 == old ? name : $0 }
             for k in st.sessions.keys where st.sessions[k]?.host == host && st.sessions[k]?.group == old {
                 st.sessions[k]?.group = name
-                if let d = st.sessions[k]?.managedDir, let nd = Workspace.rebase(d, from: oldPath, to: newPath) {
+                if let d = st.sessions[k]?.managedDir, let root = Workspace.rootOf(managedDir: d, group: old),
+                   let nd = Workspace.rebase(d, from: Workspace.groupPath(root: root, group: old),
+                                             to: Workspace.groupPath(root: root, group: name)) {
                     st.sessions[k]?.managedDir = nd
                     st.sessions[k]?.path = nd
                 }
@@ -770,11 +1021,15 @@ final class SessionStore: ObservableObject {
     /// move back to <root>/<session>, and the group folder is removed only if it's then empty.
     func deleteGroup(host: String, _ name: String) async throws {
         guard state.hasGroup(name, host: host) else { throw StoreError("No group '\(name)' on \(hostLabel(host))") }
+        var roots: Set<String> = [workspaceRoot(host)]
         for rec in state.sessions.values where rec.host == host && rec.group == name {
+            if let d = rec.managedDir, let r = Workspace.rootOf(managedDir: d, group: name) { roots.insert(r) }
             try await moveWorkspace(rec.key, toGroup: nil)
         }
-        try? await runOnHost(host, Workspace.rmdirIfEmptyScript(Workspace.groupPath(root: workspaceRoot(host), group: name)),
-                             what: "remove empty group folder")
+        for root in roots.sorted() {
+            try? await runOnHost(host, Workspace.rmdirIfEmptyScript(Workspace.groupPath(root: root, group: name)),
+                                 what: "remove empty group folder")
+        }
         mutate { st in
             st.groups[host] = st.groups(for: host).filter { $0 != name }
             if st.groups[host]?.isEmpty == true { st.groups[host] = nil }
@@ -800,19 +1055,32 @@ final class SessionStore: ObservableObject {
 
     private func moveWorkspace(_ key: String, toGroup group: String?) async throws {
         guard let rec = state.sessions[key], let old = rec.managedDir else { return }
-        let target = Workspace.path(root: workspaceRoot(rec.host), group: group, session: rec.name)
+        let target = Workspace.path(root: ownRoot(rec, old), group: group, session: rec.name)
         try await runOnHost(rec.host, Workspace.moveScript(from: old, to: target), what: "move workspace folder")
         mutate { $0.sessions[key]?.managedDir = target; $0.sessions[key]?.path = target }
     }
 
     // MARK: Workspace roots
 
+    /// The root a session's folder was made under. Changing a root only affects new sessions.
+    func ownRoot(_ rec: SessionRecord, _ managedDir: String) -> String {
+        Workspace.rootOf(managedDir: managedDir, group: rec.group) ?? workspaceRoot(rec.host)
+    }
+
     func workspaceRoot(_ host: String) -> String {
         if let r = state.settings.workspaceRoots[host], !r.trimmingCharacters(in: .whitespaces).isEmpty { return r }
         if host == localHost,
-           let conf = try? String(contentsOfFile: NSHomeDirectory() + "/.muxbar/install.conf", encoding: .utf8),
+           let conf = try? String(contentsOfFile: MuxbarPaths.installConf, encoding: .utf8),
            let r = Workspace.installRoot(conf: conf) { return r }
         return host == localHost ? Workspace.defaultLocalRoot : Workspace.defaultRemoteRoot
+    }
+
+    /// Whether `path` is a folder on `host` (nil = couldn't tell, e.g. host unreachable).
+    func folderExists(host: String, path: String) async -> Bool? {
+        let r = await runner().run(host: host, script: "[ -d \(shellQuotePath(path)) ] && echo MBX_DIR_YES || echo MBX_DIR_NO", timeout: 10)
+        if r.stdout.contains("MBX_DIR_YES") { return true }
+        if r.stdout.contains("MBX_DIR_NO") { return false }
+        return nil
     }
 
     private func runOnHost(_ host: String, _ script: String, what: String) async throws {
@@ -840,32 +1108,29 @@ final class SessionStore: ObservableObject {
 
     func hostLabel(_ host: String) -> String { host == localHost ? "This Mac" : host }
 
-    // MARK: Agent conversations started anywhere (incl. outside Muxbar)
+    // MARK: Claude conversations started anywhere (incl. outside Muxbar)
 
-    func conversations(host: String, limit: Int = 40) async throws -> [Conversation] {
+    func conversations(host: String, limit: Int = 40) async throws -> [ClaudeConversation] {
         guard state.hosts.contains(host) else { throw StoreError("Unknown host \(host)") }
         let nonce = HostProbe.makeNonce()
-        let r = await runner().run(host: host, script: Conversations.script(nonce: nonce, limit: limit), timeout: 25)
+        let r = await runner().run(host: host, script: ClaudeConversations.script(nonce: nonce, limit: limit), timeout: 25)
         guard r.ok else {
             let msg = cleanSSHStderr(r.stderr)
             throw StoreError(msg.isEmpty ? "Couldn't list conversations on \(host)" : msg)
         }
-        return Conversations.parse(r.stdout, nonce: nonce, limit: limit)
+        return ClaudeConversations.parse(r.stdout, nonce: nonce)
     }
 
-    /// Continues an agent conversation in a new tmux session in its original folder.
+    /// Continues a Claude conversation in a new tmux session in its original folder.
     @discardableResult
-    func resume(host: String, conversation c: Conversation, name: String? = nil, group: String? = nil) async throws -> SessionRecord {
-        guard let cmd = Conversations.resumeCommand(c, agents: state.settings.agents) else {
-            throw StoreError("\(state.settings.agent(id: c.agent)?.name ?? c.agent) can't resume a conversation by id")
-        }
+    func resume(host: String, conversation c: ClaudeConversation, name: String? = nil, group: String? = nil) async throws -> SessionRecord {
         var rec = try await newSession(host: host, dir: c.cwd ?? "~",
-                                       name: name ?? Conversations.sessionName(for: c), command: cmd)
-        rec.conversationID = c.id
-        rec.agent = c.agent
+                                       name: name ?? ClaudeConversations.sessionName(for: c),
+                                       command: ClaudeConversations.resumeCommand(c))
+        rec.claudeSessionID = c.id
         if let g = group, state.hasGroup(g, host: host) { rec.group = g }
         let saved = rec
-        mutate { $0.sessions[saved.key]?.conversationID = saved.conversationID; $0.sessions[saved.key]?.agent = saved.agent; $0.sessions[saved.key]?.group = saved.group }
+        mutate { $0.sessions[saved.key]?.claudeSessionID = saved.claudeSessionID; $0.sessions[saved.key]?.group = saved.group }
         return state.sessions[rec.key] ?? rec
     }
 

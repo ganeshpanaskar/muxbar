@@ -1,0 +1,10 @@
+{
+ "session_id": "thr_0199a1b2",
+ "transcript_path": "/home/u/.codex/sessions/2026/10/14/rollout-2026-10-14T10-00-00-thr_0199a1b2.jsonl",
+ "cwd": "/home/u/proj",
+ "model": "gpt-6.1-sol",
+ "permission_mode": "default",
+ "hook_event_name": "UserPromptSubmit",
+ "turn_id": "turn_1",
+ "prompt": "fix the test"
+}

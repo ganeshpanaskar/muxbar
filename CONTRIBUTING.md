@@ -19,23 +19,25 @@ Muxbar builds with Apple's Command Line Tools alone (no Xcode):
 
 ```bash
 make test      # unit tests
-make install   # build, bundle, ad-hoc sign, install to ~/Applications, relaunch
+make install   # build, bundle, sign, install to ~/Applications, relaunch
 ```
 
-`HOST=local scripts/e2e.sh` runs the end-to-end suite against the installed app and local tmux.
-It only touches tmux sessions named `muxbar-e2e-*`.
+`HOST=local scripts/e2e.sh` runs the end-to-end suite against an isolated test copy of the app
+(`make bundle-test`) and its own tmux server. It only touches tmux sessions named `muxbar-e2e-*`.
 
 ## Adding or fixing an agent
 
-- Presets live in `Sources/MuxbarCore/Agent.swift` (`AgentProfile.builtins`): command, process
-  names, resume/continue commands.
-- Status cues live in `Sources/MuxbarCore/StatusClassifier.swift`. Each pattern should be backed
-  by a fixture: save real `tmux capture-pane -p -J` output to
+- **Any CLI already works** through New Session → Other. Its status is read with generic screen
+  rules (`StatusClassifier.classifyGeneric`); to recognise a new CLI by its process name, add it
+  to `StatusClassifier.knownOtherAgents` in `Sources/MuxbarCore/StatusClassifier.swift`.
+- **Deep support** (exact status from hooks, history search, resume, sleep) exists for Claude
+  Code and Codex. Every agent-specific fact lives in `AgentAdapter` (`Sources/MuxbarCore/Agents.swift`):
+  process detection, resume command, flags kept on resume. Adding an `AgentKind` case there and
+  following the compiler errors is the way in; hooks live in `agent-plugin/` and
+  `Sources/MuxbarCore/HookInstall.swift`, history in `Sources/MuxbarCore/History.swift`.
+- Status patterns should be backed by a fixture: save real `tmux capture-pane -p -J` output to
   `Tests/MuxbarCoreTests/Fixtures/status/<status>-<name>.txt` (prefix = `working`, `waiting`,
   `idle`, `notclaude` or `unknown`; add a `.procs` file to override the process list).
-- Conversation discovery (for **Continue Agent Session…**) lives in
-  `Sources/MuxbarCore/Conversations.swift`. It's a POSIX `sh` script run on the host, plus a
-  parser, and both are tested in `CoreTests.swift`.
 
 ## Releasing (maintainers)
 

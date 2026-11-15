@@ -47,8 +47,13 @@ public enum TmuxCommands {
         guard let command, !command.trimmingCharacters(in: .whitespaces).isEmpty else {
             return "env \(titleEnv) \"${SHELL:-/bin/sh}\" -l"
         }
-        let inner = command + "; exec \"${SHELL:-/bin/sh}\" -l"
-        return "env \(titleEnv) \"${SHELL:-/bin/sh}\" -lc " + shellQuote(inner)
+        // `trap : INT`: this wrapper shell has no job control, so Ctrl-C in the agent reaches it too and
+        // would skip the `exec` below — the session would die instead of returning to a shell. A no-op
+        // trap keeps it running; the agent itself still gets Ctrl-C normally (traps aren't inherited).
+        let inner = "trap : INT; " + command + "; exec \"${SHELL:-/bin/sh}\" -l"
+        // Interactive login shell (-lic): PATH additions often live in ~/.zshrc / ~/.bashrc
+        // (where many installers put `claude`), which a plain -lc never reads.
+        return "env \(titleEnv) \"${SHELL:-/bin/sh}\" -lic " + shellQuote(inner)
     }
 
     /// Script that creates a detached session and prints its `$id` on stdout.
@@ -72,15 +77,26 @@ public enum TmuxCommands {
         "\(tmux) kill-session -t \(shellQuote(id))"
     }
 
-    /// Interactive attach, run by the user's terminal (not BatchMode, so auth prompts work).
-    public static func attachRemote(host: String, id: String, sshConfigFile: String?) -> String {
-        let remote = "tmux attach-session -t " + shellQuote(id)
-        var ssh = "ssh"
-        if let f = sshConfigFile { ssh += " -F " + shellQuote(f) }
-        return "\(ssh) -t \(shellQuote(host)) \(shellQuote(remote))"
+    /// tmux as shell text: `tmux` (already shell-safe, e.g. a quoted path) plus `-L name` when a
+    /// separate tmux server is in use (test instances).
+    public static func invocation(_ tmux: String, socket: String?) -> String {
+        guard let s = socket else { return tmux }
+        return tmux + " -L " + shellQuote(s)
     }
 
-    public static func attachLocal(tmux: String, id: String) -> String {
-        "\(shellQuote(tmux)) attach-session -t \(shellQuote(id))"
+    /// The remote half of an attach: what the remote host runs (inside `ssh -t`).
+    public static func remoteAttach(id: String, socket: String?) -> String {
+        invocation("tmux", socket: socket) + " attach-session -t " + shellQuote(id)
+    }
+
+    /// Interactive attach, run by the user's terminal (not BatchMode, so auth prompts work).
+    public static func attachRemote(host: String, id: String, sshConfigFile: String?, socket: String? = nil) -> String {
+        var ssh = "ssh"
+        if let f = sshConfigFile { ssh += " -F " + shellQuote(f) }
+        return "\(ssh) -t \(shellQuote(host)) \(shellQuote(remoteAttach(id: id, socket: socket)))"
+    }
+
+    public static func attachLocal(tmux: String, id: String, socket: String? = nil) -> String {
+        "\(invocation(shellQuote(tmux), socket: socket)) attach-session -t \(shellQuote(id))"
     }
 }

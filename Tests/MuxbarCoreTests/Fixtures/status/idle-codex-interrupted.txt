@@ -1,0 +1,45 @@
+› Run the shell command: sleep 20; echo done. Then reply with just OK.
+
+• Ran sleep 20; echo done
+  └ done
+
+• OK
+
+  Worked for 26s • 10:48 AM
+
+
+› Use curl to fetch https://example.com and print the HTTP status code only. Ask me for
+  approval if needed.
+
+
+• I’ll run curl and print only the HTTP status code.
+
+• Failed (exit 6) curl --silent --output /dev/null --write-out '%{http_code}\n' https://exampl…
+  └ 000
+    + Show details
+
+• curl received no HTTP response. The approval policy rejected the network-enabled retry
+  because sandbox escalation is disabled.
+
+• Can you enable network access for this session?
+
+  No HTTP status was received. The approval policy rejected the curl retry because sandbox
+  escalation is disabled.
+
+  Worked for 26s • 10:49 AM
+
+
+› Run: sleep 60
+
+
+• Running sleep 60.
+
+■ Conversation interrupted - use /feedback if something went wrong
+
+  1 background terminal running · /ps to view · /stop to close
+
+
+› Ask Codex to do anything
+
+  GPT-6.1 Sol xhigh · /private/tmp/mbx-codex-work · Run delayed shell command
+  ? for shortcuts                                                     ⚠ 1 warning · f2 to view

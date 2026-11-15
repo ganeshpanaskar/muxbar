@@ -21,6 +21,8 @@ final class Updater {
 
     func start(store: SessionStore) {
         self.store = store
+        // A test copy of the app (MUXBAR_HOME) never updates itself.
+        guard MuxbarPaths.testHome == nil else { return }
         announceIfJustUpdated()
         DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in _ = Task<Void, Never> { await self?.check() } }
         timer = Timer.scheduledTimer(withTimeInterval: Updates.interval, repeats: true) { _ in
@@ -94,7 +96,7 @@ final class Updater {
     private func install(_ r: ReleaseInfo) {
         guard !running, let store else { return }
         guard Updates.isSafeTag(r.tag) else { Log.error("update: ignoring odd tag \(r.tag)"); return }
-        guard let conf = try? String(contentsOfFile: NSHomeDirectory() + "/.muxbar/install.conf", encoding: .utf8),
+        guard let conf = try? String(contentsOfFile: MuxbarPaths.installConf, encoding: .utf8),
               let src = Updates.sourceDir(conf: conf),
               FileManager.default.isExecutableFile(atPath: src + "/install.sh") else {
             store.banner = "Muxbar \(r.version) is available. Update with: git pull && ./install.sh"

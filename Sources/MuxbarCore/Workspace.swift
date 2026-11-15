@@ -48,6 +48,25 @@ public enum Workspace {
         "rmdir -- \(shellQuotePath(path)) 2>/dev/null; true"
     }
 
+    /// A root must be absolute or start with `~/` (resolved on its own host), on one line.
+    public static func isValidRoot(_ r: String) -> Bool {
+        let t = r.trimmingCharacters(in: .whitespaces)
+        guard t == "~" || t.hasPrefix("~/") || t.hasPrefix("/") else { return false }
+        return !t.unicodeScalars.contains { $0.value < 0x20 || $0.value == 0x7F }
+    }
+
+    /// The root a Muxbar-made folder lives under: `<root>/<group>/<session>` or `<root>/<session>`.
+    /// Sessions keep the root they were created under when the setting changes later.
+    public static func rootOf(managedDir: String, group: String?) -> String? {
+        var comps = managedDir.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        while comps.count > 1 && comps.last == "" { comps.removeLast() }
+        let drop = (group?.isEmpty == false) ? 2 : 1
+        guard comps.count > drop else { return nil }
+        comps.removeLast(drop)
+        let r = comps.joined(separator: "/")
+        return r.isEmpty ? "/" : r
+    }
+
     /// Re-roots a path that lived under `oldPrefix` (used when a group folder is renamed).
     public static func rebase(_ path: String, from oldPrefix: String, to newPrefix: String) -> String? {
         guard path == oldPrefix || path.hasPrefix(oldPrefix + "/") else { return nil }

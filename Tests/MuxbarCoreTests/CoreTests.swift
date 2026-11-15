@@ -88,10 +88,10 @@ func probeOutput(_ nonce: String, _ body: [String]) -> String {
         "@@NOW 1000",
         "@@S~|~$0~|~900~|~990~|~1~|~main",
         "@@S~|~$1~|~901~|~950~|~0~|~name~|~with\ttab",
-        "@@P~|~$0~|~1~|~1~|~zsh~|~995~|~/home/u/proj",
-        "@@P~|~$0~|~0~|~1~|~vim~|~990~|~/elsewhere",
-        "@@P~|~$1~|~1~|~1~|~bash~|~950~|~/tmp/x y",
-        "@@C\t$0\tzsh\u{1F}claude\u{1F}<defunct>\u{1F}",
+        "@@P~|~$0~|~1~|~1~|~zsh~|~995~|~%0~|~100~|~/home/u/proj",
+        "@@P~|~$0~|~0~|~1~|~vim~|~990~|~%1~|~101~|~/elsewhere",
+        "@@P~|~$1~|~1~|~1~|~bash~|~950~|~%2~|~102~|~/tmp/x y",
+        "@@C2~|~%0~|~$0~|~2048~|~3~|~zsh\u{1F}claude\u{1F}<defunct>\u{1F}",
         "@@CAP $0",
         "line one",
         "@@zzz-not-a-marker",
@@ -144,13 +144,14 @@ func probeOutput(_ nonce: String, _ body: [String]) -> String {
 // MARK: - SSH error classification
 
 @Test func sshErrors() {
-    let proxied = """
+    let dns = """
     \u{1B}[31mssh: Could not resolve hostname devbox: nodename nor servname provided, or not known
     \u{1B}[0mConnection closed by UNKNOWN port 65535
     """
-    #expect(classifySSHFailure(stderr: proxied, exitCode: 255, timedOut: false) == .unreachable)
+    #expect(classifySSHFailure(stderr: dns, exitCode: 255, timedOut: false) == .unreachable)
     #expect(classifySSHFailure(stderr: "Connection timed out during banner exchange", exitCode: 255, timedOut: false) == .unreachable)
     #expect(classifySSHFailure(stderr: "user@host: Permission denied (publickey).", exitCode: 255, timedOut: false) == .authExpired)
+    #expect(classifySSHFailure(stderr: "Authentication failed.", exitCode: 255, timedOut: false) == .authExpired)
     #expect(classifySSHFailure(stderr: "", exitCode: 0, timedOut: true) == .unreachable)
     #expect(classifySSHFailure(stderr: "sh: 1: oops", exitCode: 2, timedOut: false) == .other)
     let cleaned = cleanSSHStderr("** WARNING: connection is not using a post-quantum key exchange algorithm.\n** This session may be vulnerable to \"store now, decrypt later\" attacks.\n** The server may need to be upgraded. See https://openssh.com/pq.html\nreal error")
@@ -295,7 +296,7 @@ func probeOutput(_ nonce: String, _ body: [String]) -> String {
 @Test func parsesClaudeConversations() {
     let n = "cc"
     let out = """
-    @@cc F 51797b93-b3ab-40b6-9545-c4185af2c262 1791100000
+    @@cc F 66666666-ffff-4fff-8fff-666666666666 1791100000
     "cwd":"/private/tmp/muxbar e2e"
     {"type":"user","isMeta":true,"message":{"role":"user","content":"Caveat: local commands"}}
     {"type":"user","message":{"role":"user","content":"<command-name>/model</command-name>"}}
@@ -306,22 +307,22 @@ func probeOutput(_ nonce: String, _ body: [String]) -> String {
     {"type":"user","message":{"role":"user","content":"truncated line that never closes its quo
     @@cc END
     """
-    let c = Conversations.parse(out, nonce: n)
+    let c = ClaudeConversations.parse(out, nonce: n)
     #expect(c.count == 3)
     #expect(c[0].cwd == "/private/tmp/muxbar e2e")
     #expect(c[0].firstPrompt == "Fix the \"probe\" parser please é")
     #expect(c[0].modified == 1791100000)
     #expect(c[1].firstPrompt == "array style prompt")
     #expect(c[2].firstPrompt == "truncated line that never closes its quo")
-    #expect(Conversations.sessionName(for: c[0]) == "muxbar-e2e")
-    #expect(Conversations.resumeCommand(c[0]) == "claude --resume '51797b93-b3ab-40b6-9545-c4185af2c262'")
-    #expect(Conversations.parse("@@cc END\n", nonce: n).isEmpty)
+    #expect(ClaudeConversations.sessionName(for: c[0]) == "muxbar-e2e")
+    #expect(ClaudeConversations.resumeCommand(c[0]) == "claude --resume '66666666-ffff-4fff-8fff-666666666666'")
+    #expect(ClaudeConversations.parse("@@cc END\n", nonce: n).isEmpty)
 }
 
 @Test func conversationScriptRunsWithoutClaudeDir() async {
     let n = HostProbe.makeNonce()
-    let r = await shell("/bin/sh", ["-c", Conversations.script(nonce: n)], env: ["HOME": "/nonexistent-muxbar"])
-    #expect(r.exitCode == 0 && Conversations.parse(r.stdout, nonce: n).isEmpty)
+    let r = await shell("/bin/sh", ["-c", ClaudeConversations.script(nonce: n)], env: ["HOME": "/nonexistent-muxbar"])
+    #expect(r.exitCode == 0 && ClaudeConversations.parse(r.stdout, nonce: n).isEmpty)
 }
 
 @Test func conversationScriptReadsRealTranscripts() async throws {
@@ -333,8 +334,8 @@ func probeOutput(_ nonce: String, _ body: [String]) -> String {
     {"cwd":"/tmp/x","type":"user","message":{"role":"user","content":"hello from outside"}}
     """.write(to: proj.appendingPathComponent("abc-123.jsonl"), atomically: true, encoding: .utf8)
     let n = HostProbe.makeNonce()
-    let r = await shell("/bin/sh", ["-c", Conversations.script(nonce: n)], env: ["HOME": home.path])
-    let c = Conversations.parse(r.stdout, nonce: n)
+    let r = await shell("/bin/sh", ["-c", ClaudeConversations.script(nonce: n)], env: ["HOME": home.path])
+    let c = ClaudeConversations.parse(r.stdout, nonce: n)
     #expect(c.map(\.id) == ["abc-123"])
     #expect(c.first?.cwd == "/tmp/x" && c.first?.firstPrompt == "hello from outside")
     #expect((c.first?.modified ?? 0) > 1_700_000_000)
@@ -343,14 +344,14 @@ func probeOutput(_ nonce: String, _ body: [String]) -> String {
 @Test func hostlessGroupsMigrateUnderTheirSessionsHost() throws {
     // An earlier build stored groups as a flat list; each moves under the host of its sessions.
     let old = """
-    {"hosts":["local","devbox"],"groups":["Khoj","Empty","Mixed"],
+    {"hosts":["local","devbox"],"groups":["API","Empty","Mixed"],
      "sessions":{
-      "local|$0|1":{"key":"local|$0|1","host":"local","tmuxID":"$0","created":1,"name":"a","ended":false,"tags":[],"archived":false,"group":"Khoj"},
+      "local|$0|1":{"key":"local|$0|1","host":"local","tmuxID":"$0","created":1,"name":"a","ended":false,"tags":[],"archived":false,"group":"API"},
       "devbox|$0|2":{"key":"devbox|$0|2","host":"devbox","tmuxID":"$0","created":2,"name":"b","ended":false,"tags":[],"archived":false,"group":"Mixed"},
       "local|$1|3":{"key":"local|$1|3","host":"local","tmuxID":"$1","created":3,"name":"c","ended":false,"tags":[],"archived":false,"group":"Mixed"}}}
     """
     let st = try JSONDecoder().decode(AppState.self, from: Data(old.utf8))
-    #expect(st.groups(for: "local") == ["Khoj", "Mixed"])
+    #expect(st.groups(for: "local") == ["API", "Mixed"])
     #expect(st.groups(for: "devbox") == ["Mixed"])
     #expect(!st.hasGroup("Empty", host: "local"))
     // And the new shape round-trips.
@@ -359,17 +360,17 @@ func probeOutput(_ nonce: String, _ body: [String]) -> String {
 }
 
 @Test func claudeSessionIDValidation() {
-    #expect(Conversations.isValidSessionID("51797b93-b3ab-40b6-9545-c4185af2c262"))
-    #expect(Conversations.isValidSessionID("  abcdef12  "))
-    #expect(!Conversations.isValidSessionID("abc"))
-    #expect(!Conversations.isValidSessionID("x'; rm -rf / #"))
-    #expect(!Conversations.isValidSessionID("$(id)-12345678"))
+    #expect(ClaudeConversations.isValidSessionID("66666666-ffff-4fff-8fff-666666666666"))
+    #expect(ClaudeConversations.isValidSessionID("  abcdef12  "))
+    #expect(!ClaudeConversations.isValidSessionID("abc"))
+    #expect(!ClaudeConversations.isValidSessionID("x'; rm -rf / #"))
+    #expect(!ClaudeConversations.isValidSessionID("$(id)-12345678"))
 }
 
 // MARK: - Workspace folders
 
 @Test func workspacePaths() {
-    #expect(Workspace.path(root: "~/Muxbar", group: "Khoj", session: "index") == "~/Muxbar/Khoj/index")
+    #expect(Workspace.path(root: "~/Muxbar", group: "API", session: "index") == "~/Muxbar/API/index")
     #expect(Workspace.path(root: "~/Muxbar/", group: nil, session: "index") == "~/Muxbar/index")
     #expect(Workspace.path(root: "/w", group: "a/b:c", session: "..hidden") == "/w/a-b-c/hidden")
     #expect(Workspace.folderName("  ") == "untitled")
@@ -410,14 +411,14 @@ func probeOutput(_ nonce: String, _ body: [String]) -> String {
     var outside = SessionRecord(key: "local|$0|1", host: "local", tmuxID: "$0", created: 1, name: "hemant")
     outside.group = "Product Graph"                       // older record: no origin, no workspace folder
     var mine = SessionRecord(key: "local|$1|2", host: "local", tmuxID: "$1", created: 2, name: "mine")
-    mine.origin = .muxbar; mine.group = "Khoj"
+    mine.origin = .muxbar; mine.group = "API"
     var managed = SessionRecord(key: "local|$2|3", host: "local", tmuxID: "$2", created: 3, name: "ws")
-    managed.managedDir = "~/Muxbar/Khoj/ws"; managed.group = "Khoj"   // older record with a workspace folder
+    managed.managedDir = "~/Muxbar/API/ws"; managed.group = "API"   // older record with a workspace folder
     st.sessions = [outside.key: outside, mine.key: mine, managed.key: managed]
     #expect(outside.isOutside && !mine.isOutside && !managed.isOutside)
     #expect(st.ejectOutsideFromGroups() == 1)
     #expect(st.sessions[outside.key]?.group == nil)
-    #expect(st.sessions[mine.key]?.group == "Khoj" && st.sessions[managed.key]?.group == "Khoj")
+    #expect(st.sessions[mine.key]?.group == "API" && st.sessions[managed.key]?.group == "API")
     // A probe-discovered session is marked outside.
     var st2 = AppState()
     Reconciler.apply(ProbeResult(tmuxVersion: "tmux 3.6a", tmuxMissing: false,
@@ -427,10 +428,10 @@ func probeOutput(_ nonce: String, _ body: [String]) -> String {
 }
 
 @Test func resumeEndedCommandAndRestoreFields() throws {
-    #expect(Conversations.resumeEndedCommand(sessionID: "51797b93-b3ab-40b6-9545-c4185af2c262")
-            == "claude --resume '51797b93-b3ab-40b6-9545-c4185af2c262'")
-    #expect(Conversations.resumeEndedCommand(sessionID: nil) == "claude --continue")
-    #expect(Conversations.resumeEndedCommand(sessionID: "bad; id") == "claude --continue")
+    #expect(ClaudeConversations.resumeEndedCommand(claudeSessionID: "66666666-ffff-4fff-8fff-666666666666")
+            == "claude --resume '66666666-ffff-4fff-8fff-666666666666'")
+    #expect(ClaudeConversations.resumeEndedCommand(claudeSessionID: nil) == "claude --continue")
+    #expect(ClaudeConversations.resumeEndedCommand(claudeSessionID: "bad; id") == "claude --continue")
     var st = AppState(); st.openPanes = ["a", "b"]; st.lastSelected = "b"
     let back = try JSONDecoder().decode(AppState.self, from: try JSONEncoder().encode(st))
     #expect(back.openPanes == ["a", "b"] && back.lastSelected == "b")
@@ -451,10 +452,11 @@ func probeOutput(_ nonce: String, _ body: [String]) -> String {
 
 @Test func tmuxScrollScriptsAgainstRealTmux() async throws {
     guard let tmux = findLocalTmux() else { return }
-    let name = "muxbar-unit-scroll"
-    // A private tmux server, so the test never shows up among (or touches) the user's sessions.
-    let q = shellQuote(tmux) + " -L muxbar-unit-\(UUID().uuidString.prefix(8))"
-    _ = await shell("/bin/sh", ["-c", "\(q) -f /dev/null new-session -d -s \(name) -x 80 -y 20 'seq 1 300; exec sleep 60'"])
+    let name = "muxbar-unit-scroll-\(UUID().uuidString.prefix(6))"
+    // A tmux server of its own (`-L`): never the user's default server. Killed before returning
+    // (a cleanup Task in `defer` can be cut off when the test process exits).
+    let q = "\(shellQuote(tmux)) -L \(name)"
+    _ = await shell("/bin/sh", ["-c", "\(q) new-session -d -s \(name) -x 80 -y 20 'seq 1 300; exec sleep 60'"])
     try await Task.sleep(nanoseconds: 700_000_000)
     let id = (await shell("/bin/sh", ["-c", "\(q) display -p -t '=\(name):' '#{session_id}'"])).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     func info() async -> TmuxScrollInfo? { TmuxScroll.parse((await shell("/bin/sh", ["-c", TmuxScroll.infoScript(tmux: q, id: id)])).stdout) }
@@ -465,51 +467,174 @@ func probeOutput(_ nonce: String, _ body: [String]) -> String {
     #expect((await info())?.position == 200)
     _ = await shell("/bin/sh", ["-c", TmuxScroll.gotoScript(tmux: q, id: id, position: 0)])
     #expect((await info())?.atLive == true)
-    // kill-server can leave the socket file behind; remove it too.
-    _ = await shell("/bin/sh", ["-c", "S=$(\(q) display -p '#{socket_path}'); \(q) kill-server; rm -f \"$S\""])
+    _ = await shell("/bin/sh", ["-c", "\(q) kill-server"])
 }
 
-@Test func conversationScriptReadsCodexAndGemini() async throws {
-    let home = FileManager.default.temporaryDirectory.appendingPathComponent("muxbar-h-\(UUID().uuidString)")
-    let codex = home.appendingPathComponent(".codex/sessions/2026/10/04")
-    let gemini = home.appendingPathComponent(".gemini/tmp/abc123/chats")
-    for d in [codex, gemini] { try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true) }
-    try """
-    {"timestamp":"t","type":"session_meta","payload":{"id":"0199aaaa-bbbb-cccc-dddd-eeeeffff0000","cwd":"/tmp/cx"}}
-    {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>x</environment_context>"}]}}
-    {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello codex"}]}}
-    """.write(to: codex.appendingPathComponent("rollout-2026-10-04T10-00-00-0199aaaa-bbbb-cccc-dddd-eeeeffff0000.jsonl"),
-              atomically: true, encoding: .utf8)
-    try """
-    {
-      "sessionId": "1234abcd-0000-1111-2222-333344445555",
-      "messages": [
-        { "id": "m1", "type": "user", "content": "hello gemini" }
-      ]
+@Test func fullScreenAppsPageInsteadOfTmuxHistory() {
+    let claude = TmuxScroll.parse("0 0  68 1")!
+    #expect(claude.alternate && !claude.usesTmuxHistory)
+    let shell = TmuxScroll.parse("281 0  20 0")!
+    #expect(!shell.alternate && shell.usesTmuxHistory)
+    let empty = TmuxScroll.parse("0 0  20 0")!
+    #expect(!empty.usesTmuxHistory)          // nothing to scroll: never enter copy mode
+    #expect(TmuxScroll.pageKeysScript(id: "$3", pages: 2) == "tmux send-keys -t '$3' PPage PPage")
+    #expect(TmuxScroll.pageKeysScript(id: "$3", pages: -1) == "tmux send-keys -t '$3' NPage")
+    #expect(TmuxScroll.pageKeysScript(id: "$3", pages: 0) == "true")
+}
+
+@Test func mouseSettingDefaultsOffAndLoadsFromOldFiles() throws {
+    #expect(AppSettings().passMouseToApps == false)
+    let st = try JSONDecoder().decode(AppState.self, from: Data(#"{"settings":{"terminal":"embedded"}}"#.utf8))
+    #expect(st.settings.passMouseToApps == false)
+    var s = AppSettings(); s.passMouseToApps = true
+    #expect(try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(s)).passMouseToApps)
+}
+
+@Test func testFoldersNeverBecomeRecent() {
+    var st = AppState()
+    st.rememberDir("/tmp/muxbar-e2e-dir", host: "devbox")
+    st.rememberDir("~/src/real", host: "devbox")
+    #expect(st.recentDirs["devbox"] == ["~/src/real"])
+    st.recentDirs["devbox"] = ["/tmp/muxbar-e2e-ws2/x", "~/src/real", "/tmp/muxbar-unit-1"]
+    #expect(st.forgetTestDirs() == 2 && st.recentDirs["devbox"] == ["~/src/real"])
+}
+
+@Test func paneCommandUsesInteractiveLoginShell() {
+    #expect(TmuxCommands.paneCommand("claude").contains("\" -lic '"))
+}
+
+@Test func paneCommandSurvivesCtrlC() async {
+    // Regression: Ctrl-C in the agent also reached the wrapper shell, which then skipped
+    // `exec "$SHELL" -l` — the tmux session died instead of returning to a shell.
+    let cmd = TmuxCommands.paneCommand("kill -INT $$; echo still-here")
+    let r = await shell("/bin/sh", ["-c", cmd], env: ["SHELL": "/bin/sh", "PATH": "/usr/bin:/bin", "HOME": "/tmp"])
+    #expect(r.stdout.contains("still-here"), "out=\(r.stdout) err=\(r.stderr)")
+}
+
+@Test func runProcessSurvivesManyShortCommands() async {
+    // Regression: availableData raised (abort) when the drain raced a readability callback.
+    // 4 × 100 concurrent processes: enough to hit the race, below the per-user process limit while
+    // the other tests run in parallel.
+    var failures: [String] = []
+    for batch in 0..<4 {
+        let bad = await withTaskGroup(of: String?.self) { g in
+            for i in 0..<100 {
+                g.addTask {
+                    let n = batch * 100 + i
+                    let r = await runProcess("/bin/sh", ["-c", "printf 'x%.0s' $(seq 1 \(n % 50)); echo; echo err >&2"], timeout: 30)
+                    return r.exitCode == 0 && r.stderr.contains("err") ? nil : "#\(n): exit \(r.exitCode) \(r.stderr.prefix(80))"
+                }
+            }
+            var out: [String] = []
+            for await b in g { if let b { out.append(b) } }
+            return out
+        }
+        failures += bad
     }
-    """.write(to: gemini.appendingPathComponent("session-2026-10-04T10-00-1234abcd.json"), atomically: true, encoding: .utf8)
-    try "/tmp/gm\n".write(to: home.appendingPathComponent(".gemini/tmp/abc123/.project_root"), atomically: true, encoding: .utf8)
-    let n = HostProbe.makeNonce()
-    let r = await shell("/bin/sh", ["-c", Conversations.script(nonce: n)], env: ["HOME": home.path])
-    let c = Conversations.parse(r.stdout, nonce: n)
-    let cx = try #require(c.first { $0.agent == "codex" })
-    #expect(cx.id == "0199aaaa-bbbb-cccc-dddd-eeeeffff0000" && cx.cwd == "/tmp/cx" && cx.firstPrompt == "hello codex")
-    #expect(Conversations.resumeCommand(cx) == "codex resume '0199aaaa-bbbb-cccc-dddd-eeeeffff0000'")
-    let gm = try #require(c.first { $0.agent == "gemini" })
-    #expect(gm.id == "1234abcd-0000-1111-2222-333344445555" && gm.cwd == "/tmp/gm" && gm.firstPrompt == "hello gemini")
-    #expect(Conversations.resumeCommand(gm) == "gemini --resume '1234abcd-0000-1111-2222-333344445555'")
+    #expect(failures.isEmpty, "\(failures.prefix(5))")
 }
 
-@Test func agentResumeCommandsAndRecordCompat() throws {
-    #expect(Conversations.resumeEndedCommand(agent: .codex, sessionID: nil) == "codex resume --last")
-    let grok = AgentProfile(id: "grok", name: "Grok", command: "grok")
-    #expect(Conversations.resumeEndedCommand(agent: grok, sessionID: "51797b93-b3ab") == "grok")
-    #expect(Conversations.resumeCommand(Conversation(agent: "grok", id: "51797b93-b3ab", cwd: nil, firstPrompt: nil, modified: 0),
-                                        agents: [grok]) == nil)
-    // Records saved before agents were generic keep their conversation id.
-    let old = #"{"key":"k","host":"local","tmuxID":"$1","created":1,"name":"a","ended":false,"tags":[],"archived":false,"claudeSessionID":"abc-12345"}"#
-    let rec = try JSONDecoder().decode(SessionRecord.self, from: Data(old.utf8))
-    #expect(rec.conversationID == "abc-12345" && rec.agent == nil)
+@Test func nonASCIIScriptsReachTheShellUnchanged() async throws {
+    // Process would send "É" decomposed (E + U+0301); scripts must arrive byte for byte.
+    let r = await SystemRunner().run(host: localHost, script: "printf %s 'É café' | od -An -tx1 | tr -s ' \\n' ' '", timeout: 10)
+    #expect(r.stdout.trimmingCharacters(in: .whitespaces) == "c3 89 20 63 61 66 c3 a9", "\(r.stdout) \(r.stderr)")
+    let up = await SystemRunner().run(host: localHost, script: "cat; printf ' ü'", timeout: 10, stdin: Data("in".utf8))
+    #expect(up.stdout == "in ü")
+    #expect(asciiSafeScript("echo hi") == "echo hi")
+}
+
+
+@Test func wheelEventsForAppsWithMouseReporting() {
+    let claude = TmuxScroll.parse("0 0  68 1 100 1")!
+    #expect(claude.alternate && claude.mouse == .sgr && !claude.usesTmuxHistory)
+    #expect(TmuxScroll.parse("0 0  68 1 000 0")!.mouse == .off)
+    #expect(TmuxScroll.parse("0 0  68 1 100 0")!.mouse == .legacy)
+    // A script's own output before the info line is skipped.
+    #expect(TmuxScroll.parse("noise\n281 0  20 0 000 0\n")?.history == 281)
+    // ESC [ < 64 ; 2 ; 34 M, twice: two wheel-up reports in one call.
+    let up = TmuxScroll.wheelScript(id: "$3", events: 2, mouse: .sgr, col: 2, row: 34)
+    let one = "1b 5b 3c 36 34 3b 32 3b 33 34 4d"
+    #expect(up == "tmux send-keys -t '$3' -H \(one) \(one)")
+    #expect(TmuxScroll.wheelScript(id: "$3", events: -1, mouse: .sgr, col: 2, row: 34).contains("36 35"))   // 65 = down
+    #expect(TmuxScroll.wheelScript(id: "$3", events: -1, mouse: .legacy, col: 2, row: 34).hasSuffix("1b 5b 4d 61 22 42"))
+    #expect(TmuxScroll.wheelScript(id: "$3", events: 3, mouse: .off, col: 2, row: 34) == "true")
+}
+
+@Test func wheelEventsReachTheAppThroughRealTmux() async throws {
+    guard let tmux = findLocalTmux() else { return }
+    let name = "muxbar-unit-wheel-\(UUID().uuidString.prefix(6))"
+    let q = "\(shellQuote(tmux)) -L \(name)"
+    let out = FileManager.default.temporaryDirectory.appendingPathComponent("\(name).bytes").path
+    defer { try? FileManager.default.removeItem(atPath: out) }
+    // An app that turns on SGR mouse reporting on the alternate screen and records its input.
+    let app = "printf '\\033[?1049h\\033[?1000h\\033[?1006h'; stty raw -echo; exec dd bs=1 count=22 of=\(out) 2>/dev/null"
+    _ = await shell("/bin/sh", ["-c", "\(q) new-session -d -s \(name) -x 80 -y 20 \(shellQuote(app))"])
+    try await Task.sleep(nanoseconds: 700_000_000)
+    let id = (await shell("/bin/sh", ["-c", "\(q) display -p -t '=\(name):' '#{session_id}'"])).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+    let info = TmuxScroll.parse((await shell("/bin/sh", ["-c", TmuxScroll.infoScript(tmux: q, id: id)])).stdout)
+    #expect(info?.alternate == true && info?.mouse == .sgr)
+    _ = await shell("/bin/sh", ["-c", TmuxScroll.wheelScript(tmux: q, id: id, events: 2, mouse: .sgr, col: 2, row: 10)])
+    try await Task.sleep(nanoseconds: 500_000_000)
+    _ = await shell("/bin/sh", ["-c", "\(q) kill-server"])
+    #expect((try? String(contentsOfFile: out, encoding: .utf8)) == "\u{1B}[<64;2;10M\u{1B}[<64;2;10M")
+}
+
+@Test func clientInputForWheelAndPages() {
+    #expect(TmuxScroll.clientWheelBytes(events: 2, col: 40, row: 12) == Array("\u{1B}[<64;40;12M\u{1B}[<64;40;12M".utf8))
+    #expect(TmuxScroll.clientWheelBytes(events: -1, col: 1, row: 1) == Array("\u{1B}[<65;1;1M".utf8))
+    #expect(TmuxScroll.clientWheelBytes(events: 0, col: 1, row: 1).isEmpty)
+    #expect(TmuxScroll.clientPageBytes(pages: -2) == Array("\u{1B}[6~\u{1B}[6~".utf8))
+}
+
+@Test func agentShellKeepsSessionAfterCommandExits() {
+    let cmd = TmuxCommands.paneCommand("claude")
+    #expect(cmd.hasPrefix("env CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 "))
+    #expect(cmd.contains("trap : INT; claude; exec"))
+}
+
+@Test func newSessionStartIsRememberedAndDefaultsToClaude() throws {
+    var s = AppSettings()
+    #expect(s.newSessionStart == "claude" && s.checkForUpdates)
+    s.newSessionStart = "other"
+    s.otherCommand = "gemini --yolo"
+    let back = try JSONDecoder().decode(AppSettings.self, from: try JSONEncoder().encode(s))
+    #expect(back.newSessionStart == "other" && back.otherCommand == "gemini --yolo")
+    // Settings saved by an older version have no such keys.
+    let old = try JSONDecoder().decode(AppSettings.self, from: Data("{}".utf8))
+    #expect(old.newSessionStart == "claude" && old.otherCommand == "" && old.checkForUpdates)
+}
+
+@Test func startCommandsForAnyAgent() {
+    var s = AppSettings()
+    #expect(s.startCommand("shell") == nil)
+    #expect(s.startCommand("claude") == "claude" && s.startCommand("codex") == "codex")
+    #expect(s.startCommand("other") == nil, "no command typed yet: a shell")
+    s.otherCommand = "  /opt/bin/grok -m fast "
+    #expect(s.startCommand("other") == "/opt/bin/grok -m fast")
+    #expect(s.otherAgentNames.contains("grok") && s.otherAgentNames.contains("gemini"))
+    s.otherCommand = "env FOO=1 mycli"
+    #expect(s.otherAgentNames.last == "mycli")
+}
+
+@Test func classifiesOtherAgentScreens() {
+    let gem = ["gemini"]
+    #expect(StatusClassifier.classify(processes: ["zsh", "node"], lines: ["x"], otherAgents: gem) == .notClaude)
+    #expect(StatusClassifier.isOtherAgentProcess("node /opt/homebrew/bin/gemini", gem))
+    #expect(StatusClassifier.isOtherAgentProcess("/usr/local/bin/gemini", gem))
+    #expect(!StatusClassifier.isOtherAgentProcess("gemini-helper", gem))
+    let working = ["⠏ Reading files (esc to cancel, 12s)", "", "> Type your message"]
+    #expect(StatusClassifier.classify(processes: ["zsh", "gemini"], lines: working, outputAge: 0, otherAgents: gem) == .working)
+    let asking = ["Allow execution of: 'npm test'?", "● 1. Yes, allow once", "  2. No"]
+    #expect(StatusClassifier.classify(processes: ["zsh", "gemini"], lines: asking, outputAge: 30, otherAgents: gem) == .waiting)
+    let idle = ["✦ Done. All tests pass.", "", "> Type your message or @path/to/file"]
+    #expect(StatusClassifier.classify(processes: ["zsh", "gemini"], lines: idle, outputAge: 30, otherAgents: gem) == .idle)
+    #expect(StatusClassifier.classify(processes: ["zsh", "gemini"], lines: idle, outputAge: 1, otherAgents: gem) == .unknown)
+    #expect(StatusClassifier.classify(processes: ["zsh", "gemini"], lines: working, outputAge: 40, otherAgents: gem) == .idle,
+            "a busy line on a screen that stopped changing is stale")
+    // An answered question stays on screen above the new input line: no longer waiting.
+    #expect(StatusClassifier.classify(processes: ["zsh", "gemini"], lines: asking + idle, outputAge: 30, otherAgents: gem) == .idle)
+    // Claude and Codex keep their own rules.
+    #expect(StatusClassifier.classify(processes: ["zsh", "claude"], lines: ["❯ 1. Yes"], otherAgents: gem) == .waiting)
 }
 
 @Test func updateDecisions() {
@@ -562,40 +687,3 @@ func probeOutput(_ nonce: String, _ body: [String]) -> String {
     #expect(FileManager.default.fileExists(atPath: co + "/two") && FileManager.default.fileExists(atPath: co + "/installed.txt"))
 }
 
-@Test func fullscreenAppScrolling() {
-    // Claude Code's full-screen UI: alternate screen, mouse requested, no tmux history.
-    let cc = TmuxScroll.parse("0 0  69 1 1\n")!
-    #expect(cc.fullscreen && cc.appMouse && cc.history == 0 && cc.atLive)
-    let shell = TmuxScroll.parse("281 0  20 0 0")!
-    #expect(!shell.fullscreen && !shell.appMouse)
-    #expect(TmuxScroll.parse("1 0  20 1") == nil)
-
-    let up = TmuxScroll.appScrollScript(id: "$3", ticks: 2, mouse: true, col: 10, row: 34)
-    #expect(up == #"tmux send-keys -t '$3' -l "$(printf '\033[<64;10;34M\033[<64;10;34M')""#)
-    #expect(TmuxScroll.appScrollScript(id: "$3", ticks: -1, mouse: true).contains("[<65;"))
-    #expect(TmuxScroll.appScrollScript(id: "$3", ticks: -3, mouse: false) == "tmux send-keys -t '$3' Down Down Down")
-    #expect(TmuxScroll.appScrollScript(id: "$3", ticks: 0, mouse: true) == "true")
-    #expect(TmuxScroll.appScrollScript(id: "$3", ticks: 500, mouse: false).split(separator: " ").count == 4 + 30)
-    #expect(TmuxScroll.appPageScript(id: "$3", pages: 2) == "tmux send-keys -t '$3' PPage PPage")
-    #expect(TmuxScroll.appPageScript(id: "$3", pages: -1) == "tmux send-keys -t '$3' NPage")
-    #expect(TmuxScroll.appPageScript(id: "$3", pages: 0) == "true")
-}
-
-@Test func fullscreenAppReceivesWheelEvents() async throws {
-    // A real full-screen app on a private tmux server: it enables SGR mouse mode on the alternate
-    // screen and records what it reads; the wheel script must reach it as wheel-up events.
-    guard let tmux = findLocalTmux() else { return }
-    let q = shellQuote(tmux) + " -L muxbar-unit-\(UUID().uuidString.prefix(8))"
-    let out = FileManager.default.temporaryDirectory.appendingPathComponent("muxbar-wheel-\(UUID().uuidString)").path
-    let app = "printf '\\033[?1049h\\033[?1000h\\033[?1006h'; stty raw -echo; dd bs=1 count=24 of=\(out) 2>/dev/null; sleep 30"
-    _ = await shell("/bin/sh", ["-c", "\(q) -f /dev/null new-session -d -s w -x 80 -y 20 \(shellQuote(app))"])
-    try await Task.sleep(nanoseconds: 800_000_000)
-    let id = (await shell("/bin/sh", ["-c", "\(q) display -p -t w: '#{session_id}'"])).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-    let info = TmuxScroll.parse((await shell("/bin/sh", ["-c", TmuxScroll.infoScript(tmux: q, id: id)])).stdout)
-    #expect(info?.fullscreen == true && info?.appMouse == true)
-    _ = await shell("/bin/sh", ["-c", TmuxScroll.appScrollScript(tmux: q, id: id, ticks: 2, mouse: true, col: 10, row: 5)])
-    try await Task.sleep(nanoseconds: 800_000_000)
-    let got = (try? String(contentsOfFile: out, encoding: .utf8)) ?? ""
-    #expect(got == "\u{1B}[<64;10;5M\u{1B}[<64;10;5M", "got \(got.debugDescription)")
-    _ = await shell("/bin/sh", ["-c", "S=$(\(q) display -p '#{socket_path}'); \(q) kill-server; rm -f \"$S\" \(shellQuote(out))"])
-}

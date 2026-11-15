@@ -1,0 +1,6 @@
+{"timestamp":"2026-10-14T10:00:00.000Z","type":"session_meta","payload":{"id":"22222222-bbbb-4bbb-8bbb-222222222222","timestamp":"2026-10-14T10:00:00.000Z","cwd":"/tmp/muxbar-e2e-hist","originator":"codex_cli_rs","cli_version":"0.46.0","git":{"branch":"feature/x"}}}
+{"timestamp":"2026-10-14T10:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>cwd</environment_context>"}]}}
+{"timestamp":"2026-10-14T10:00:00.000Z","type":"turn_context","payload":{"cwd":"/tmp/muxbar-e2e-hist","model":"gpt-5-codex"}}
+{"timestamp":"2026-10-14T10:00:00.000Z","type":"event_msg","payload":{"type":"user_message","message":"Add a retry to the uploader; tag it zebra-quartz-7731","images":[]}}
+{"timestamp":"2026-10-14T10:00:00.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\": [\"bash\", \"-lc\", \"rg uploader\"]}","call_id":"c1"}}
+{"timestamp":"2026-10-14T10:00:00.000Z","type":"event_msg","payload":{"type":"agent_message","message":"Added exponential backoff to the uploader."}}

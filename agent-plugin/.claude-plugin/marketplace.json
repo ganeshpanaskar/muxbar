@@ -1,0 +1,16 @@
+{
+  "name": "muxbar",
+  "owner": {
+    "name": "Muxbar"
+  },
+  "metadata": {
+    "description": "Muxbar's own plugins (local, installed by Muxbar)"
+  },
+  "plugins": [
+    {
+      "name": "muxbar-status",
+      "source": "./plugins/muxbar-status",
+      "description": "Reports the agent's state (working, waiting for you, idle) to Muxbar, the macOS session manager."
+    }
+  ]
+}

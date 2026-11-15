@@ -2,69 +2,81 @@ import Foundation
 
 /// Classifies a pane from its processes and last screen lines (F8).
 /// Heuristic by design: when no rule matches confidently it answers `.unknown`.
-/// Agent-neutral: the markers below cover the built-in agents' screens plus generic conventions,
-/// and each `AgentProfile` can add its own (user-added CLIs such as Grok).
 /// Patterns are pinned by fixtures in Tests/MuxbarCoreTests/Fixtures/status.
 public enum StatusClassifier {
-    /// Text that only appears while an agent waits for a choice (permission, trust, menus).
-    /// Claude Code: "Do you want to…", "Esc to cancel". Codex: "Would you like to run…",
-    /// "Yes, proceed". Gemini CLI: "Allow execution of…", "Apply this change?", "Yes, allow once".
-    static let waitingMarkers = ["Do you want to", "Enter to confirm", "Esc to cancel", "Would you like to",
-                                 "Yes, proceed", "Allow execution", "Apply this change?", "Yes, allow once"]
+    /// Text that only appears while Claude Code waits for a choice (permission, trust, menus).
+    static let waitingMarkers = ["Do you want to", "Enter to confirm", "Esc to cancel", "Would you like to"]
 
     /// Claude Code's busy line: a spinner glyph, a gerund, then an ellipsis
     /// ("✽ Considering… (6s · thinking)"). Older versions print "esc to interrupt".
     static let workingRegex = try! NSRegularExpression(pattern: #"^\s*[·✢✳✶✻✽*]\s+\S[^\n]*…"#)
-    /// Gemini CLI's busy line: "⠋ Thinking about it (esc to cancel, 12s)".
-    static let geminiWorkingRegex = try! NSRegularExpression(pattern: #"\(esc to cancel, \d+"#)
     /// A finished turn: "✻ Sautéed for 25s · done 7:03 AM", "✻ Baked for 1m 2s".
     static let completionRegex = try! NSRegularExpression(
         pattern: #"^\s*[·✢✳✶✻✽*]\s+\S+ for (\d+h\s*)?(\d+m\s*)?\d+s\b"#)
-    /// A highlighted menu option: "❯ 1. Yes" (Claude), "› 1. Yes" / "▌ 1. Yes" (Codex), "● 1. Yes" (Gemini).
-    static let numberedChoice = try! NSRegularExpression(pattern: #"^[\s│]*[❯›▌●]\s+\d+\.\s"#)
+    static let numberedChoice = try! NSRegularExpression(pattern: #"^\s*❯\s+\d+\.\s"#)
     /// The user's submitted prompt echoed in the transcript: "❯ some text" (not the empty input box).
     static let promptEcho = try! NSRegularExpression(pattern: #"^❯ +\S"#)
+    static let versionName = try! NSRegularExpression(pattern: #"^[0-9]+\.[0-9]+(\.[0-9]+)?$"#)
+    /// An interrupted turn (Esc): "⎿  Interrupted · What should Claude do instead?". Claude fires no
+    /// hook for it, so the screen is the only signal that the turn is over.
+    static let interrupted = try! NSRegularExpression(pattern: #"^\s*⎿\s+Interrupted\b"#)
 
-    /// True if the process is one of `agents`. See `AgentProfile.matching(process:in:)`.
-    public static func isAgentProcess(_ name: String, agents: [AgentProfile] = AgentProfile.builtins) -> Bool {
-        AgentProfile.matching(process: name, in: agents) != nil
+    /// True if any process on the pane's tty is Claude Code. Native installs can report a bare
+    /// version string as the process name; some package managers report a full path.
+    public static func isClaudeProcess(_ name: String) -> Bool {
+        let base = (name.split(separator: "/").last.map(String.init) ?? name).trimmingCharacters(in: .whitespaces)
+        if base == "claude" || base.hasPrefix("claude ") { return true }
+        return versionName.firstMatch(in: base, range: NSRange(base.startIndex..., in: base)) != nil
     }
 
     /// Output newer than this (seconds) means the screen is being written to right now.
     public static let streamingAge = 2
 
-    /// - Parameter outputAge: seconds since the pane last produced output (tmux `window_activity`).
-    /// - Parameter agents: the agents to recognise (built-ins plus the user's own).
-    public static func classify(processes: [String]?, lines: [String]?, outputAge: Int? = nil,
-                                agents: [AgentProfile] = AgentProfile.builtins) -> SessionStatus {
-        let lines = lines ?? []
-        let agentByProcess = processes?.contains { isAgentProcess($0, agents: agents) }
-        let waiting = waitingMarkers + agents.flatMap(\.waitingMarkers).filter { !$0.isEmpty }
-        let working = ["esc to interrupt"] + agents.flatMap(\.workingMarkers).filter { !$0.isEmpty }
+    /// Other terminal agents recognised by process name. Muxbar has no deep integration with them
+    /// (hooks, history, sleep), but their screens are read with generic rules. Settings → New
+    /// sessions → Other command adds its own executable to this list.
+    public static let knownOtherAgents = ["gemini", "grok", "aider", "opencode", "goose", "amp", "qwen",
+                                          "crush", "cursor-agent", "copilot", "kimi", "droid"]
 
-        if let byProcess = agentByProcess {
+    /// - Parameter outputAge: seconds since the pane last produced output (tmux `window_activity`).
+    /// - Parameter otherAgents: process names of other agent CLIs (see `knownOtherAgents`).
+    public static func classify(processes: [String]?, lines: [String]?, outputAge: Int? = nil,
+                                otherAgents: [String] = knownOtherAgents) -> SessionStatus {
+        let lines = lines ?? []
+        let claudeByProcess = processes?.contains(where: isClaudeProcess)
+        if claudeByProcess != true, processes?.contains(where: { AgentAdapter.kind(argv0: $0, args: $0) == .codex }) == true {
+            return classifyCodex(lines)
+        }
+        if claudeByProcess != true, processes?.contains(where: { isOtherAgentProcess($0, otherAgents) }) == true {
+            return classifyGeneric(lines, outputAge: outputAge)
+        }
+        let looksLikeClaude = lines.contains { $0.contains("⏵⏵") || $0.contains("⏸") || $0.contains("? for shortcuts") }
+            || hasInputBox(lines)
+
+        if let byProcess = claudeByProcess {
             if !byProcess {
-                // A runtime alone isn't proof (other Node/Python apps), but an agent screen plus
-                // one is — that's how Gemini CLI and npm/pip-installed agents show up.
-                let runtimes: Set<Substring> = ["node", "bun", "deno", "python", "python3"]
-                let runtime = processes?.contains { runtimes.contains($0.split(separator: "/").last ?? "") } ?? false
-                if !(runtime && looksLikeAgent(lines, agents: agents)) { return .notAgent }
+                // `node` alone isn't proof (other Node apps), but a Claude screen plus node is.
+                let node = processes?.contains { ($0.split(separator: "/").last ?? "") == "node" } ?? false
+                if !(node && looksLikeClaude) { return .notClaude }
             }
         } else if lines.isEmpty {
             return .unknown
         }
 
         if lines.isEmpty { return .unknown }
-        if lines.contains(where: { l in waiting.contains(where: l.contains) || matches(numberedChoice, l) }) {
+        if lines.contains(where: { l in waitingMarkers.contains(where: l.contains) || matches(numberedChoice, l) }) {
             return .waiting
         }
-        if lines.contains(where: { l in working.contains(where: l.contains) || matches(workingRegex, l) || matches(geminiWorkingRegex, l) }) {
+        if lines.contains(where: { $0.contains("esc to interrupt") || matches(workingRegex, $0) }) {
             return .working
         }
         guard hasInputBox(lines) else { return .unknown }
         // While a reply streams, this Claude Code version shows no spinner, only the input box.
         // A finished turn leaves a completion line; a fresh session shows only the banner.
         if lines.contains(where: { matches(completionRegex, $0) }) { return .idle }
+        // Interrupted after the last prompt you sent: the turn is over.
+        if let i = lines.lastIndex(where: { matches(interrupted, $0) }),
+           i > (lines.lastIndex(where: { matches(promptEcho, $0) }) ?? -1) { return .idle }
         let conversation = lines.contains { $0.hasPrefix("⏺") || matches(promptEcho, $0) }
         if let age = outputAge, age <= streamingAge {
             return conversation ? .working : .unknown
@@ -75,24 +87,79 @@ public enum StatusClassifier {
         return .unknown
     }
 
-    /// Screen furniture that only agent CLIs draw (status bars, shortcut hints, input boxes).
-    static func looksLikeAgent(_ lines: [String], agents: [AgentProfile] = []) -> Bool {
-        let markers = ["⏵⏵", "⏸", "? for shortcuts", "context left", "Type your message", "⏎ send"]
-            + agents.flatMap { $0.waitingMarkers + $0.workingMarkers }.filter { !$0.isEmpty }
-        return lines.contains { l in markers.contains(where: l.contains) } || hasInputBox(lines)
+    /// Codex's menus (hook trust, approvals): "› 1. Yes, proceed", with a confirm hint below.
+    static let codexChoice = try! NSRegularExpression(pattern: #"^\s*›\s+\d+\.\s"#)
+    /// Codex's busy line: "• Working (18s • esc to interrupt)".
+    static let codexWorking = try! NSRegularExpression(pattern: #"^\s*•\s+Working\b"#)
+
+    /// Codex's screen (used when its hooks aren't installed or trusted yet). A turn always shows
+    /// the Working line; otherwise the input line and its "? for shortcuts" footer mean idle.
+    static func classifyCodex(_ lines: [String]) -> SessionStatus {
+        if lines.isEmpty { return .unknown }
+        if lines.contains(where: { matches(codexChoice, $0) }),
+           lines.contains(where: { $0.contains("confirm") || $0.contains("Would you like to") }) { return .waiting }
+        if lines.contains(where: { matches(codexWorking, $0) || $0.contains("esc to interrupt") }) { return .working }
+        if lines.contains(where: { $0.contains("? for shortcuts") }) || lines.last(where: { $0.hasPrefix("› ") }) != nil {
+            return .idle
+        }
+        return .unknown
     }
 
-    /// The prompt box: a prompt glyph line directly framed by horizontal rules — `❯` (Claude),
-    /// `›` (Codex) or `>` inside a `╭──╮` box (Gemini).
+    /// A process (name or `ps` args) is one of `names`, by its executable's base name.
+    public static func isOtherAgentProcess(_ process: String, _ names: [String]) -> Bool {
+        let first = process.split(separator: " ").first.map(String.init) ?? process
+        let base = first.split(separator: "/").last.map(String.init) ?? first
+        if names.contains(base) { return true }
+        // npm installs run as `node …/bin/gemini`.
+        guard base == "node" || base == "bun" || base.lowercased().hasPrefix("python") else { return false }
+        let words = process.split(separator: " ").dropFirst().prefix(2)
+        return words.contains { w in names.contains(w.split(separator: "/").last.map(String.init) ?? String(w)) }
+    }
+
+    /// Text other agent CLIs show while waiting for a decision.
+    static let genericWaitingMarkers = ["Do you want to", "Would you like to", "Allow execution", "Allow once",
+                                        "Yes, allow", "Apply this change?", "Waiting for user confirmation",
+                                        "(y/n)", "[y/N]", "[Y/n]"]
+    /// A menu choice under the cursor: "❯ 1. Yes", "› 1. Yes", "● 1. Yes".
+    static let genericChoice = try! NSRegularExpression(pattern: #"^\s*[│ ]*[❯›●▶]\s+\d+\.\s"#)
+    /// Busy lines: "(esc to cancel, 12s)", "esc to interrupt", "Esc to stop".
+    static let genericWorking = try! NSRegularExpression(pattern: #"(?i)\(?esc to (cancel|interrupt|stop)\b"#)
+
+    /// Any other agent CLI's screen (Gemini CLI, Grok, Aider…): menus and confirmations are
+    /// waiting, a busy line is working, a screen that stopped changing is idle.
+    static func classifyGeneric(_ lines: [String], outputAge: Int?) -> SessionStatus {
+        if lines.isEmpty { return .unknown }
+        let tail = Array(lines.suffix(15))
+        // A question above the newest input prompt was already answered (the input box shows
+        // again); a busy line shows together with the input box, so that one counts anywhere.
+        let prompt = tail.lastIndex(where: { matches(genericPrompt, $0) && !matches(genericChoice, $0) }) ?? -1
+        if tail.suffix(from: prompt + 1).contains(where: { l in genericWaitingMarkers.contains(where: l.contains) || matches(genericChoice, l) }) {
+            return .waiting
+        }
+        // A busy line redraws its timer every second; one left on a screen that stopped changing
+        // is stale.
+        if tail.contains(where: { matches(genericWorking, $0) }), (outputAge ?? 0) <= 5 { return .working }
+        guard let age = outputAge else { return .unknown }
+        return age > 5 ? .idle : .unknown
+    }
+
+    /// An input line: "> ", "❯ ", "› " at the start (or inside a box border).
+    static let genericPrompt = try! NSRegularExpression(pattern: #"^\s*[│|]?\s*[>❯›]( |$)"#)
+
+    /// The latest turn was interrupted (Esc): the "Interrupted" line comes after the last prompt
+    /// you sent. Claude fires no hook for this, so it's how a stale "working" hook state ends.
+    public static func interruptedLatestTurn(_ lines: [String]?) -> Bool {
+        guard let lines, let i = lines.lastIndex(where: { matches(interrupted, $0) }) else { return false }
+        return i > (lines.lastIndex(where: { matches(promptEcho, $0) }) ?? -1)
+    }
+
+    /// The prompt box: a `❯` line directly framed by horizontal rules.
     static func hasInputBox(_ lines: [String]) -> Bool {
-        for (i, l) in lines.enumerated() {
-            let t = l.trimmingCharacters(in: CharacterSet(charactersIn: " │\t"))
-            guard t.hasPrefix("❯") || t.hasPrefix("›") || (t.hasPrefix(">") && l.contains("│")) else { continue }
+        for (i, l) in lines.enumerated() where l.trimmingCharacters(in: .whitespaces).hasPrefix("❯") {
             let above = i > 0 ? lines[i - 1] : ""
             let below = i + 1 < lines.count ? lines[i + 1] : ""
             if above.contains("──") && below.contains("──") { return true }
             if above.contains("──") || l.contains("? for shortcuts") { return true }
-            if below.contains("? for shortcuts") || below.contains("context left") { return true }
         }
         return false
     }

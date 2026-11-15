@@ -1,0 +1,137 @@
+{
+  "description": "Muxbar status: records the agent's state (working, waiting, idle) for Muxbar's session list. Writes ~/.muxbar/state/<server>-<pane>.json; prints nothing.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/muxbar-hook\" codex SessionStart",
+            "timeout": 5,
+            "statusMessage": "muxbar-status",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/muxbar-hook\" codex UserPromptSubmit",
+            "timeout": 5,
+            "statusMessage": "muxbar-status",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/muxbar-hook\" codex PreToolUse",
+            "timeout": 5,
+            "statusMessage": "muxbar-status",
+            "async": true
+          }
+        ],
+        "matcher": ".*"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/muxbar-hook\" codex PostToolUse",
+            "timeout": 5,
+            "statusMessage": "muxbar-status",
+            "async": true
+          }
+        ],
+        "matcher": ".*"
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/muxbar-hook\" codex PermissionRequest",
+            "timeout": 5,
+            "statusMessage": "muxbar-status",
+            "async": true
+          }
+        ],
+        "matcher": ".*"
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/muxbar-hook\" codex Stop",
+            "timeout": 5,
+            "statusMessage": "muxbar-status",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Interrupt": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/muxbar-hook\" codex Interrupt",
+            "timeout": 3,
+            "statusMessage": "muxbar-status",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/muxbar-hook\" codex PreCompact",
+            "timeout": 5,
+            "statusMessage": "muxbar-status",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/muxbar-hook\" codex PostCompact",
+            "timeout": 5,
+            "statusMessage": "muxbar-status",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/muxbar-hook\" codex SessionEnd",
+            "timeout": 3,
+            "statusMessage": "muxbar-status"
+          }
+        ]
+      }
+    ]
+  }
+}

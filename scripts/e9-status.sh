@@ -6,7 +6,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-M="$HOME/Applications/Muxbar.app/Contents/MacOS/Muxbar"
+. scripts/e2e-env.sh   # test instance + its tmux server by default (TARGET=user for the installed app)
 mb() { perl -e 'alarm 90; exec @ARGV' "$M" --cli "$@"; }
 OUT=e2e-artifacts/e9-status
 rm -rf "$OUT"; mkdir -p "$OUT"
@@ -65,4 +65,5 @@ text '/exit'; sleep 4
 for _ in 1 2; do sample notClaude; sleep 1; done
 
 printf 'samples=%d correct=%d unknown=%d wrong=%d\n' "$n" "$ok" "$unknown" "$wrong" | tee "$OUT/summary.txt"
+tmux kill-session -t "$ID" 2>/dev/null   # leave nothing behind for later rows (unread state)
 [ "$wrong" -eq 0 ]

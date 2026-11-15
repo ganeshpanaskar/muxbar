@@ -21,6 +21,7 @@ final class AppIconController {
     var isDark: Bool { NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua }
 
     func apply() {
+        AppModel.shared.store.embedded.recolorAll()
         let name = isDark ? "AppIcon-dark" : "AppIcon-light"
         if let url = Bundle.main.url(forResource: name, withExtension: "png"), let img = NSImage(contentsOf: url) {
             NSApp.applicationIconImage = img
