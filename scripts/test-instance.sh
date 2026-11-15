@@ -8,6 +8,8 @@
 #   scripts/test-instance.sh restart
 #   scripts/test-instance.sh cli <command> [--key value ...]
 #   scripts/test-instance.sh pid | env
+#   MUXBAR_TEST_INTERACTIVE=1 scripts/test-instance.sh restart   to try it by hand: its window comes
+#                                                                   forward when clicked (tests: unset)
 set -uo pipefail
 cd "$(dirname "$0")/.."
 

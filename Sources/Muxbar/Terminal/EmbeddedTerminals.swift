@@ -19,6 +19,9 @@ final class EmbeddedSession: NSObject, ObservableObject, LocalProcessTerminalVie
     private(set) var pid: pid_t = 0
     private(set) var starts = 0
 
+    /// Told when the pane's process ends by itself (not when Muxbar stops it).
+    var onExit: ((String) -> Void)?
+
     init(key: String) {
         self.key = key
         view = EmbeddedSession.makeView()
@@ -141,6 +144,7 @@ final class EmbeddedSession: NSObject, ObservableObject, LocalProcessTerminalVie
             state = .exited(nil)
             EmbeddedSession.releaseLater(view, pid: pid)
             Log.info("embedded \(key): process \(pid) gone (pid check)")
+            onExit?(key)
         }
     }
 
@@ -181,9 +185,10 @@ final class EmbeddedSession: NSObject, ObservableObject, LocalProcessTerminalVie
         Task { @MainActor in
             EmbeddedSession.releaseSlave(of: source)
             // Ignore the old pane's exit after a restart.
-            guard source === self.view else { return }
+            guard source === self.view, self.state == .running else { return }
             self.state = .exited(exitCode)
             Log.info("embedded \(self.key): process exited (\(exitCode.map(String.init) ?? "nil"))")
+            self.onExit?(self.key)
         }
     }
 }
@@ -192,6 +197,8 @@ final class EmbeddedSession: NSObject, ObservableObject, LocalProcessTerminalVie
 final class EmbeddedTerminals: ObservableObject {
     @Published private(set) var sessions: [String: EmbeddedSession] = [:]
     private var timer: Timer?
+    /// A pane's attach ended by itself (connection dropped, or its tmux session is gone).
+    var onPaneExit: ((String) -> Void)?
 
     init() {
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -212,6 +219,7 @@ final class EmbeddedTerminals: ObservableObject {
             return .restarted
         }
         let s = EmbeddedSession(key: key)
+        s.onExit = { [weak self] k in self?.onPaneExit?(k) }
         sessions[key] = s
         s.start(executable: executable, args: args)
         return .started
@@ -240,7 +248,7 @@ enum MainWindowPresenter {
     static func show() {
         activateApp()
         if let w = NSApp.windows.first(where: { $0.identifier?.rawValue.hasPrefix("main") == true }) {
-            if TestEnv.isTest { if !w.isVisible { w.orderBack(nil) } } else { w.makeKeyAndOrderFront(nil) }
+            if TestEnv.isTest && !TestEnv.isInteractive { if !w.isVisible { w.orderBack(nil) } } else { w.makeKeyAndOrderFront(nil) }
         } else if let open = openMain {
             open()
         } else {

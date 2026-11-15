@@ -1173,5 +1173,42 @@ E59() {
   else fail E59 "steps '$steps' want '$want' (wrap row=$wrap)"; fi
 }
 
+E60() {
+  # After the host's tmux server goes away (a restart): an attached pane's session shows as ended
+  # by itself within seconds; removing a session Muxbar hasn't seen end yet works; Resume All
+  # brings back each agent session with its own conversation, skipping a duplicate conversation and
+  # a session with no agent.
+  [ "$TERMINAL" = embedded ] || { skip E60 "built-in terminal only"; return; }
+  local steps="" c1=11111111-1111-4111-8111-111111111111 c2=22222222-2222-4222-8222-222222222222
+  mb new --host "$HOST" --name muxbar-e2e-ra --dir /tmp --cmd 'sleep 900' >/dev/null
+  for n in rb rc rd; do mb new --host "$HOST" --name muxbar-e2e-$n --dir /tmp --cmd 'sleep 900' --no-attach >/dev/null; done
+  mb set-conversation --host "$HOST" --id muxbar-e2e-ra --conversation $c1 --agent claude >/dev/null
+  mb set-conversation --host "$HOST" --id muxbar-e2e-rb --conversation $c2 --agent codex >/dev/null
+  mb set-conversation --host "$HOST" --id muxbar-e2e-rc --conversation $c1 --agent claude >/dev/null   # same conversation as ra
+  wait_for 25 is_attached muxbar-e2e-ra; sleep 2
+  # The host "restarts": its tmux server goes away. No refresh from here on: the pane's exit has to do it.
+  rsh "tmux kill-server" >/dev/null 2>&1
+  local i ended=no; for i in $(seq 16); do mb list --json | python3 -c 'import json,sys; sys.exit(0 if any(s["name"]=="muxbar-e2e-ra" and s["ended"] for s in json.load(sys.stdin)["result"]) else 1)' && { ended=yes; break; }; sleep 0.5; done
+  [ $ended = yes ] && steps="${steps}ended-on-its-own "
+  # A session Muxbar still lists as running, whose tmux server is gone: removing it works.
+  mb new --host "$HOST" --name muxbar-e2e-re --dir /tmp --cmd 'sleep 900' --no-attach >/dev/null
+  rsh "tmux kill-server" >/dev/null 2>&1
+  mb kill --host "$HOST" --id muxbar-e2e-re --yes >/dev/null 2>&1 && ! mb list | grep -q muxbar-e2e-re && steps="${steps}remove-gone-works "
+  mb refresh --host "$HOST" >/dev/null
+  local r; r=$(mb resume-all --host "$HOST")
+  # Other rows may have left ended sessions too: ours must be in the right lists.
+  local res sk; res=$(sed -n 's/.*resumed=\([^ ]*\).*/\1/p' <<< "$r"); sk=$(sed -n 's/.*skipped=\([^ ]*\).*/\1/p' <<< "$r")
+  [[ ",$res," == *",muxbar-e2e-ra,"* && ",$res," == *",muxbar-e2e-rb,"* && ",$sk," == *",muxbar-e2e-rc,"* && ",$sk," == *",muxbar-e2e-rd,"* \
+     && ",$res," != *",muxbar-e2e-rc,"* && ",$res," != *",muxbar-e2e-rd,"* ]] && steps="${steps}resume-all-picks "
+  grep -q "resumed ended session muxbar-e2e-ra on $HOST with: claude --resume '$c1'" "$MUXBAR_HOME/logs/app.log" \
+    && grep -q "resumed ended session muxbar-e2e-rb on $HOST with: codex resume '$c2'" "$MUXBAR_HOME/logs/app.log" && steps="${steps}own-conversations "
+  rsh "tmux list-sessions -F '#{session_name}'" | grep -qx muxbar-e2e-ra && rsh "tmux list-sessions -F '#{session_name}'" | grep -qx muxbar-e2e-rb && steps="${steps}running-again "
+  for n in ra rb rc rd; do local id; id=$(idof muxbar-e2e-$n); [ -n "$id" ] && mb kill --host "$HOST" --id "$id" --yes >/dev/null 2>&1; done
+  mb dismiss-ended --host "$HOST" >/dev/null
+  local want="ended-on-its-own remove-gone-works resume-all-picks own-conversations running-again "
+  if [ "$steps" = "$want" ]; then pass E60 "tmux server gone: attached session ended by itself in ≤ $((i / 2 + 1)) s (no refresh), removing a not-yet-noticed one works; Resume All resumed ra (claude) and rb (codex) with their own conversations, skipped the duplicate and the no-agent one"
+  else fail E60 "steps '$steps' want '$want' (resume-all: $r)"; fi
+}
+
 V2_LOCAL=(E32 E36 E44 E46 E54)
-V2_ALL=(E33 E34 E35 E37 E38 E39 E40 E41 E42 E43 E45 E47 E48 E49 E50 E51 E52 E55 E56 E57 E58 E59)
+V2_ALL=(E33 E34 E35 E37 E38 E39 E40 E41 E42 E43 E45 E47 E48 E49 E50 E51 E52 E55 E56 E57 E58 E59 E60)

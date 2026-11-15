@@ -105,6 +105,7 @@ final class SessionStore: ObservableObject {
         }
         for h in state.hosts { health[h] = .unknown }
         pendingRestore = Set(state.openPanes)
+        embedded.onPaneExit = { [weak self] key in self?.paneExited(key) }
         pendingSelection = state.lastSelected
         // Sessions started outside Muxbar stay in "Others" (never in groups).
         var st = state
@@ -696,6 +697,18 @@ final class SessionStore: ObservableObject {
     /// The sidebar selection without attaching (a grid tile that's already open).
     func setSelection(_ key: String?) { selectedKey = key }
 
+    /// The sidebar stays shown unless you hide it (its toolbar toggle); nothing else collapses it.
+    @Published var sidebarVisibility: NavigationSplitViewVisibility = .all
+
+    /// Home: the session cards. Leaves the grid; open panes keep running.
+    func goHome() {
+        if state.layout == .grid { mutate { $0.layout = .single }; focusedTile = nil }
+        selectedKey = nil
+        sidebarVisibility = .all
+        rememberPanes()
+    }
+
+
     /// Opens (attaches) a session's built-in pane without changing the selection; grid tiles use it.
     @discardableResult
     func attachPane(_ key: String) -> FocusOutcome? {
@@ -958,8 +971,13 @@ final class SessionStore: ObservableObject {
         if selectedKey == key { selectedKey = nil }
         defer { rememberPanes() }
         if let id = rec.tmuxID, !rec.ended {
-            _ = try await runTmux(host: rec.host, TmuxCommands.kill(tmux: try tmuxPath(rec.host), id: id))
-            Log.info("killed \(rec.name) (\(id)) on \(rec.host)")
+            do {
+                _ = try await runTmux(host: rec.host, TmuxCommands.kill(tmux: try tmuxPath(rec.host), id: id))
+                Log.info("killed \(rec.name) (\(id)) on \(rec.host)")
+            } catch let e as StoreError where TmuxCommands.meansSessionGone(e.message) {
+                // Already gone (e.g. the host restarted and Muxbar hadn't noticed yet): just forget it.
+                Log.info("\(rec.name) on \(rec.host) was already gone; removed it")
+            }
         }
         mutate { $0.sessions[key] = nil }
         live[key] = nil
@@ -1132,6 +1150,37 @@ final class SessionStore: ObservableObject {
         let saved = rec
         mutate { $0.sessions[saved.key]?.claudeSessionID = saved.claudeSessionID; $0.sessions[saved.key]?.group = saved.group }
         return state.sessions[rec.key] ?? rec
+    }
+
+    /// A pane's attach ended by itself: look at its host now (not at the next poll), so a session
+    /// that's gone — the host restarted — shows as ended with Resume instead of Reconnect.
+    private var exitRefreshPending = Set<String>()
+    func paneExited(_ key: String) {
+        guard let rec = state.sessions[key], rec.tmuxID != nil, !rec.ended, !exitRefreshPending.contains(rec.host) else { return }
+        exitRefreshPending.insert(rec.host)
+        Task {
+            try? await Task.sleep(nanoseconds: 700_000_000)   // several panes of one host end together
+            await refresh(host: rec.host)
+            exitRefreshPending.remove(rec.host)
+        }
+    }
+
+    /// Resumes every ended agent session on `host`, each in its own conversation (after a host
+    /// restart). Sessions without an agent, and a second session recorded with the same
+    /// conversation, are left as they are. Returns the names resumed and skipped.
+    func resumeAllEnded(host: String) async -> (resumed: [String], skipped: [String], failed: [String]) {
+        var resumed: [String] = [], skipped: [String] = [], failed: [String] = [], seen = Set<String>()
+        let ended = state.sessions.values.filter { $0.host == host && $0.ended && !$0.isPlainTab }.sorted { $0.name < $1.name }
+        for rec in ended {
+            guard rec.agent != nil else { skipped.append(rec.name); continue }
+            if let c = rec.resumeID { guard seen.insert(c).inserted else { skipped.append(rec.name); continue } }
+            do { _ = try await resumeEnded(key: rec.key); resumed.append(rec.name) } catch {
+                failed.append(rec.name)
+                Log.error("resume all on \(host): \(rec.name) failed: \(error.localizedDescription)")
+            }
+        }
+        Log.info("resume all on \(host): resumed \(resumed.count), skipped \(skipped.count), failed \(failed.count)")
+        return (resumed, skipped, failed)
     }
 
     func dismissEnded(host: String? = nil) {

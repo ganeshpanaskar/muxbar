@@ -77,6 +77,12 @@ public enum TmuxCommands {
         "\(tmux) kill-session -t \(shellQuote(id))"
     }
 
+    /// tmux's ways of saying the session (or its whole server) no longer exists.
+    public static func meansSessionGone(_ message: String) -> Bool {
+        let m = message.lowercased()
+        return ["no server running", "can't find session", "session not found", "no sessions", "error connecting to"].contains { m.contains($0) }
+    }
+
     /// tmux as shell text: `tmux` (already shell-safe, e.g. a quoted path) plus `-L name` when a
     /// separate tmux server is in use (test instances).
     public static func invocation(_ tmux: String, socket: String?) -> String {

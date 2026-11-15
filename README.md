@@ -103,14 +103,23 @@ running sessions.
 4. Go do something else. When an agent finishes or asks for permission, you get a notification
    and the session lands in the **Inbox**. Press **⌘J** to jump to the next one that needs you.
 5. Want to watch several at once? **⌘-click** sessions to show them side by side in a **grid**.
-6. Close the lid. Tomorrow, open Muxbar: everything is where you left it, and the agents that were
+6. Press **⌘0** for **Home**: a card per session showing what each agent is doing or last said.
+7. Close the lid. Tomorrow, open Muxbar: everything is where you left it, and the agents that were
    still working have finished.
 
 ## Features
 
+### Home: every session at a glance
+
+**Home** (top of the sidebar, or **⌘0**) shows every session as a card, sorted into **Needs
+you**, **Working**, **Finished** and everything else. Each card shows the agent, where it runs,
+what it's doing right now ("Asking permission to continue", "Running tools…") and the start of
+its last reply. Click a card to open the session; your open sessions keep running behind Home.
+
 ### Status at a glance
 
-Every session has a colored dot:
+Every session shows its agent (Claude, Codex or a terminal for a shell) with a colored status
+dot:
 
 | Dot | Meaning |
 |---|---|
@@ -145,8 +154,10 @@ for another agent is a great first contribution: see [CONTRIBUTING.md](CONTRIBUT
 - Everything runs in tmux, so a VPN drop, sleep, an expired SSH login or quitting Muxbar never
   kills an agent. The pane shows **Disconnected — Reconnect**, and Muxbar reconnects on its own
   once it can.
-- If a machine restarts, its sessions show as **ended**. Click **Resume Session** and Muxbar
-  recreates it with the same name, folder and group, and continues the agent's conversation.
+- If a machine restarts, its sessions show as **ended** within seconds, folded under **Ended** in
+  that host's list. Click **Resume** and Muxbar recreates a session with the same name, folder and
+  group, and continues the agent's conversation. **Resume all** brings back every ended Claude and
+  Codex session on that host at once, each in its own conversation.
 - tmux sessions you started yourself (`tmux new -s foo`) show up under **Others**; click to attach.
 
 ### Inbox and notifications
@@ -220,6 +231,7 @@ an image path into an attached image. For remote sessions Muxbar copies the file
 
 | Keys | |
 |---|---|
+| ⌘0 | Home: every session at a glance |
 | ⌘K | Quick switcher |
 | ⌘J | Next session that needs you (waiting, then finished) |
 | ⌘⇧H | Search conversation history |

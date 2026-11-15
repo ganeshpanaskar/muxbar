@@ -687,3 +687,11 @@ func probeOutput(_ nonce: String, _ body: [String]) -> String {
     #expect(FileManager.default.fileExists(atPath: co + "/two") && FileManager.default.fileExists(atPath: co + "/installed.txt"))
 }
 
+
+@Test func tmuxSaysTheSessionIsGone() {
+    #expect(TmuxCommands.meansSessionGone("no server running on /tmp/tmux-501/default"))
+    #expect(TmuxCommands.meansSessionGone("can't find session: $4"))
+    #expect(TmuxCommands.meansSessionGone("error connecting to /tmp/tmux-1000/default (No such file or directory)"))
+    #expect(!TmuxCommands.meansSessionGone("Permission denied (publickey)"))
+    #expect(!TmuxCommands.meansSessionGone("Connection timed out during banner exchange"))
+}

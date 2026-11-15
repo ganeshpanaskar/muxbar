@@ -58,6 +58,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         activateApp()
+        // Reopening from the Dock starts at Home (the session you had stays open, a click away).
+        if !flag { AppModel.shared.store.goHome() }
         if let w = sender.windows.first(where: { $0.identifier?.rawValue.hasPrefix("main") == true }) {
             w.makeKeyAndOrderFront(nil)
             return false
@@ -136,6 +138,8 @@ struct MuxbarApp: App {
                     if !s.switcherOpen { s.restoreTerminalFocus() }
                 }
                 .keyboardShortcut("k", modifiers: .command)
+                Button("Home") { MainWindowPresenter.show(); AppModel.shared.store.goHome() }
+                    .keyboardShortcut("0", modifiers: .command)
                 Button("Next in Inbox (waiting, then finished)") { Actions.nextWaiting(AppModel.shared.store) }
                     .keyboardShortcut("j", modifiers: .command)
                 Button("Search History…") { WindowOpener.open?("history") }
@@ -239,8 +243,9 @@ enum LoginItem {
 /// order the main window front explicitly.
 @MainActor
 func activateApp() {
-    // A test instance runs while the user works: never take focus or cover their windows.
-    if TestEnv.isTest {
+    // A test instance runs while the user works: never take focus or cover their windows
+    // (unless started for trying it by hand: MUXBAR_TEST_INTERACTIVE=1).
+    if TestEnv.isTest && !TestEnv.isInteractive {
         for w in NSApp.windows where w.identifier?.rawValue.hasPrefix("main") == true && w.isVisible { w.orderBack(nil) }
         return
     }

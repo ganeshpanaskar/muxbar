@@ -76,6 +76,21 @@ enum ControlHandler {
                     try? await Task.sleep(nanoseconds: ms * 1_000_000)
                 }
                 return ok(["steps": count, "seconds": String(format: "%.2f", Date().timeIntervalSince(t0))])
+            case "test-mouse":
+                // Test hook (test instance only): a left click at --x/--y in the main window (points from
+                // its top-left), as mouse events through the app.
+                guard TestEnv.isTest else { throw StoreError("test-mouse only runs in a test instance") }
+                guard let w = NSApp.windows.first(where: { $0.identifier?.rawValue.hasPrefix("main") == true }),
+                      let x = str("x").flatMap(Double.init), let y = str("y").flatMap(Double.init) else { throw StoreError("--x --y") }
+                let p = NSPoint(x: x, y: w.contentLayoutRect.maxY - y + (w.frame.height - w.contentLayoutRect.maxY))
+                for t in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                    if let e = NSEvent.mouseEvent(with: t, location: p, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                  windowNumber: w.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
+                        NSApp.postEvent(e, atStart: false)
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                return ok(["selected": store.selectedKey.flatMap { store.state.sessions[$0]?.name } ?? ""])
             case "test-click":
                 // Test hook (test instance only): a click — or a drag to --to-col, or a double-click
                 // (--count 2) — at --row/--col of a session's pane, as mouse events through the app,
@@ -516,6 +531,11 @@ enum ControlHandler {
                 guard let rec = store.state.sessions.values.first(where: { $0.host == h && $0.ended && ($0.name == ref || $0.tmuxID == ref || $0.key == ref) })
                 else { throw StoreError("No ended session '\(ref)' on \(h)") }
                 return ok(sessionJSON(store)(try await store.resumeEnded(key: rec.key)))
+            case "resume-all":
+                let h = try need("host")
+                guard store.state.hosts.contains(h) else { throw StoreError("Unknown host \(h)") }
+                let r = await store.resumeAllEnded(host: h)
+                return ok(["resumed": r.resumed.joined(separator: ","), "skipped": r.skipped.joined(separator: ","), "failed": r.failed.joined(separator: ",")])
             case "restore-state":
                 return ok(["openPanes": store.state.openPanes.compactMap { store.state.sessions[$0]?.name },
                            "lastSelected": store.state.lastSelected.flatMap { store.state.sessions[$0]?.name } ?? ""])
@@ -601,6 +621,12 @@ enum ControlHandler {
                 // Test hook: report or close the main window (exercises the reopen path).
                 let w = NSApp.windows.first { $0.identifier?.rawValue.hasPrefix("main") == true }
                 if str("action") == "close" { w?.close(); return ok("closed") }
+                if let wd = str("width").flatMap(Double.init), let w {   // resize (test layouts at a given size)
+                    var f = w.frame; f.size.width = wd
+                    if let ht = str("height").flatMap(Double.init) { f.size.height = ht }
+                    w.setFrame(f, display: true)
+                    return ok(["state": w.isVisible ? "open" : "closed", "width": Int(w.frame.width), "height": Int(w.frame.height)])
+                }
                 return ok(w?.isVisible == true ? "open" : "closed")
             case "glyph":
                 // Test hook: export the menu-bar glyph at an animation phase (0…1) as a 4x PNG.

@@ -128,6 +128,9 @@ public enum TestEnv {
     /// `MUXBAR_TEST=1`: record notifications instead of posting them, and never activate the app
     /// (a test copy must not steal focus from whatever the user is doing).
     public static var isTest: Bool { value("MUXBAR_TEST") == "1" }
+    /// `MUXBAR_TEST_INTERACTIVE=1`: a test instance started for trying it by hand behaves like the
+    /// real app with windows (comes to the front when you click); still its own home and tmux.
+    public static var isInteractive: Bool { value("MUXBAR_TEST_INTERACTIVE") == "1" }
 }
 
 /// PATH for local commands: apps launched from Finder get a minimal PATH without Homebrew.

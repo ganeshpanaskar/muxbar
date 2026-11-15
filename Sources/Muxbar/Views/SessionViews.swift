@@ -89,6 +89,11 @@ struct HostSection: View {
                     .padding(.horizontal, 5).padding(.vertical, 1)
                     .background(Capsule().fill(health == .ok ? Color.green.opacity(0.15) : Color.orange.opacity(0.2)))
                 Spacer()
+                if sessions.contains(where: { $0.ended && $0.agent != nil }) {
+                    Button("Resume all") { Actions.resumeAll(store, host: host) }
+                        .buttonStyle(.borderless).font(.caption)
+                        .help("Resume every ended Claude/Codex session here, each in its own conversation")
+                }
                 if sessions.contains(where: \.ended) {
                     Button("Clear ended") { store.dismissEnded(host: host) }
                         .buttonStyle(.borderless).font(.caption)
@@ -321,8 +326,23 @@ enum Actions {
     }
 
     static func reconnect(_ store: SessionStore, _ rec: SessionRecord) {
-        store.embedded.session(rec.key)?.stop()
-        Task { do { _ = try await store.focus(key: rec.key) } catch { report(store, error) } }
+        Task {
+            // Is it still there? If the host restarted it's gone, and the pane shows Resume instead.
+            await store.refresh(host: rec.host)
+            guard store.state.sessions[rec.key]?.ended == false else { return }
+            store.embedded.session(rec.key)?.stop()
+            do { _ = try await store.focus(key: rec.key) } catch { report(store, error) }
+        }
+    }
+
+    static func resumeAll(_ store: SessionStore, host: String) {
+        Task {
+            let r = await store.resumeAllEnded(host: host)
+            var parts = ["Resumed \(r.resumed.count) session\(r.resumed.count == 1 ? "" : "s") on \(store.hostLabel(host))"]
+            if !r.skipped.isEmpty { parts.append("left \(r.skipped.joined(separator: ", ")) (no agent, or the same conversation as another)") }
+            if !r.failed.isEmpty { parts.append("couldn't resume \(r.failed.joined(separator: ", ")); see the log") }
+            store.banner = parts.joined(separator: "; ") + "."
+        }
     }
 
     static func remove(_ store: SessionStore, _ rec: SessionRecord) {
@@ -352,7 +372,7 @@ struct MenuContent: View {
             HStack {
                 Button { activateApp(); openWindow(id: "new") } label: { Label("New Session", systemImage: "plus") }
                 Spacer()
-                Button { activateApp(); openWindow(id: "main") } label: { Image(systemName: "macwindow") }
+                Button { activateApp(); store.goHome(); openWindow(id: "main") } label: { Image(systemName: "macwindow") }
                     .help("Open window")
                 SettingsLink { Image(systemName: "gearshape") }.help("Settings")
                 Button { NSApp.terminate(nil) } label: { Image(systemName: "power") }.help("Quit Muxbar")
@@ -372,9 +392,9 @@ struct MainWindow: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: Binding(get: { store.sidebarVisibility }, set: { store.sidebarVisibility = $0 })) {
             Sidebar()
-                .navigationSplitViewColumnWidth(min: 220, ideal: 270, max: 400)
+                .navigationSplitViewColumnWidth(min: 250, ideal: 300, max: 420)
         } detail: {
             if store.settings.terminal == .embedded {
                 if store.inGrid { GridPane() } else { DetailPane() }
@@ -383,6 +403,10 @@ struct MainWindow: View {
             }
         }
         .toolbar {
+            ToolbarItem {
+                Button { store.goHome() } label: { Label("Home", systemImage: "house") }
+                    .help("Home: every session at a glance (⌘0)")
+            }
             ToolbarItem {
                 Button { openWindow(id: "new") } label: { Label("New Session", systemImage: "plus") }
                     .help("New session")
@@ -429,8 +453,9 @@ struct Sidebar: View {
     var body: some View {
         // List writes the selection back on redraws; only a *change* of selection may attach,
         // otherwise a redraw would reconnect a dropped session in a loop.
-        List(selection: Binding(get: { store.selectedKey }, set: { raw in
+        List(selection: Binding(get: { store.selectedKey ?? (store.inGrid ? nil : "home") }, set: { raw in
             // Rows in "Needs input" are tagged "pin:<key>" so a session can appear twice.
+            if raw == "home" { store.goHome(); return }
             let k = raw.map { $0.hasPrefix("pin:") ? String($0.dropFirst(4)) : $0 }
             guard k != store.selectedKey else { return }
             // ⌘-click: the session joins (or leaves) the grid instead.
@@ -452,83 +477,142 @@ struct Sidebar: View {
             if let banner = store.banner {
                 BannerView(text: banner, automation: store.automationDenied) { store.banner = nil }
             }
+            HomeRow().tag("home")
             // Inbox: needs input first (longest waiting), then finished and unread (newest first).
-            let waiting = store.waitingSessions
-            let finished = store.unreadFinished
-            if !waiting.isEmpty || !finished.isEmpty {
-                Section {
-                    ForEach(waiting + finished) { rec in
-                        SidebarRow(rec: rec, location: store.location(of: rec), inInbox: true).tag("pin:" + rec.key)
-                    }
-                } header: {
-                    HStack(spacing: 6) {
-                        Image(systemName: waiting.isEmpty ? "tray.full.fill" : "hand.raised.fill")
-                            .foregroundStyle(waiting.isEmpty ? Color.blue : .orange)
-                        Text("Inbox").foregroundStyle(waiting.isEmpty ? Color.blue : .orange)
-                        if !waiting.isEmpty {
-                            Text("\(waiting.count) waiting").font(.caption2).fontWeight(.bold)
-                                .padding(.horizontal, 5).padding(.vertical, 1)
-                                .background(Capsule().fill(Color.orange.opacity(0.25))).foregroundStyle(.orange)
-                        }
-                        if !finished.isEmpty {
-                            Text("\(finished.count) finished").font(.caption2).fontWeight(.bold)
-                                .padding(.horizontal, 5).padding(.vertical, 1)
-                                .background(Capsule().fill(Color.blue.opacity(0.22))).foregroundStyle(.blue)
-                        }
-                        Spacer()
-                        Text("⌘J next").font(.caption2).foregroundStyle(.secondary)
-                    }
-                    .contextMenu { Button("Mark All Read") { store.markAllRead() } }
-                }
-            }
+            if !store.waitingSessions.isEmpty || !store.unreadFinished.isEmpty { InboxSection() }
             ForEach(store.state.hosts, id: \.self) { host in
-                Section {
-                    let health = store.health[host] ?? .unknown
-                    if let hint = health.hint, health != .ok {
-                        Text(hint).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    }
-                    // This host's groups (folders), then its ungrouped sessions.
-                    ForEach(store.state.groups(for: host), id: \.self) { g in
-                        GroupNode(host: host, group: g)
-                    }
-                    ForEach(store.ungroupedSessions(for: host)) { rec in
-                        SidebarRow(rec: rec).tag(rec.key)
-                    }
-                    let others = store.otherSessions(for: host)
-                    if !others.isEmpty { OthersNode(host: host, sessions: others) }
-                    if host != localHost && (!(store.hostPorts[host] ?? []).isEmpty || !(store.state.forwards[host] ?? []).isEmpty) {
-                        PortsNode(host: host)
-                    }
-                } header: {
-                    HostHeader(host: host)
-                        .dropDestination(for: String.self) { keys, _ in
-                            // Dropping on the host header takes a session out of its group.
-                            let ks = keys.filter { store.state.sessions[$0]?.host == host }
-                            Task { for k in ks { do { try await store.setGroup(key: k, group: nil) } catch { Actions.report(store, error) } } }
-                            return true
-                        }
-                        .contextMenu {
-                            Button("New Session on \(store.hostLabel(host))…") { Actions.newSession(store, host: host, group: nil) }
-                            Button("New Group on \(store.hostLabel(host))…") { Actions.newGroup(store, host: host) }
-                            Divider()
-                            Button("Mark All Read on \(store.hostLabel(host))") { store.markAllRead(host: host) }
-                            Button("Sleep Idle Agents on \(store.hostLabel(host))") { Actions.sleepIdle(store, host: host) }
-                        }
-                }
+                HostSection2(host: host)
             }
         }
         .listStyle(.sidebar)
         .scrollIndicators(.visible)
         .safeAreaInset(edge: .bottom) {
-            VStack(alignment: .leading, spacing: 6) {
-                Button { openWindow(id: "new") } label: { Label("New Session", systemImage: "plus") }
-                Button { Actions.newGroup(store, host: nil) } label: { Label("New Group", systemImage: "folder.badge.plus") }
-                Button { openWindow(id: "continue") } label: { Label("Continue Claude Session…", systemImage: "arrow.uturn.forward") }
-                SettingsLink { Label("Settings…", systemImage: "gearshape") }
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 6) {
+                    Button { openWindow(id: "new") } label: {
+                        Label("New Session", systemImage: "plus").frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.regular)
+                    Button { store.goHome() } label: { Image(systemName: "house") }
+                        .buttonStyle(.bordered).help("Home: every session at a glance (⌘0)")
+                    Menu {
+                        Button { Actions.newGroup(store, host: nil) } label: { Label("New Group…", systemImage: "folder.badge.plus") }
+                        Button { openWindow(id: "continue") } label: { Label("Continue Claude Session…", systemImage: "arrow.uturn.forward") }
+                        Button { openWindow(id: "history") } label: { Label("Search History…", systemImage: "magnifyingglass") }
+                        Divider()
+                        SettingsLink { Label("Settings…", systemImage: "gearshape") }
+                    } label: { Image(systemName: "ellipsis") }
+                    .menuStyle(.button).menuIndicator(.hidden).fixedSize()
+                    .help("More")
+                }
             }
-            .buttonStyle(.borderless)
             .padding(10)
+            .background(.bar)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+/// "Home" at the top of the sidebar: the session cards, and how many need you or are working.
+struct HomeRow: View {
+    @EnvironmentObject var store: SessionStore
+
+    var body: some View {
+        let open = store.state.hosts.flatMap { store.sessions(for: $0) }.filter { !$0.ended }
+        let working = open.filter { store.presence(of: $0) == .working }.count
+        HStack(spacing: 10) {
+            Image(systemName: "house.fill").font(.system(size: 13)).foregroundStyle(.blue).frame(width: 22, height: 22)
+                .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.blue.opacity(0.14)))
+            Text("Home").font(.system(size: 13, weight: .medium))
+            Spacer()
+            if working > 0 {
+                Label("\(working)", systemImage: "bolt.fill").labelStyle(.titleAndIcon)
+                    .font(.system(size: 10, weight: .bold)).foregroundStyle(.blue)
+                    .help("\(working) working")
+            }
+            Text("\(open.count)").font(.caption).foregroundStyle(.secondary).help("\(open.count) open sessions")
+        }
+        .padding(.vertical, 3)
+        .help("Every session at a glance (⌘0)")
+    }
+}
+
+/// Sessions that need you, then finished ones you haven't seen.
+struct InboxSection: View {
+    @EnvironmentObject var store: SessionStore
+
+    var body: some View {
+        let waiting = store.waitingSessions
+        let finished = store.unreadFinished
+        let all: [SessionRecord] = waiting + finished
+        if !all.isEmpty {
+            Section {
+                ForEach(all) { rec in
+                    let tag: String = "pin:" + rec.key
+                    SidebarRow(rec: rec, location: store.location(of: rec), inInbox: true).tag(tag)
+                }
+            } header: {
+                HStack(spacing: 7) {
+                    Image(systemName: "tray.full.fill").foregroundStyle(waiting.isEmpty ? Color.blue : .orange)
+                    Text("Inbox").font(.system(size: 11, weight: .bold)).textCase(.uppercase).tracking(0.4)
+                    Spacer(minLength: 4)
+                    if !waiting.isEmpty {
+                        Label("\(waiting.count)", systemImage: "hand.raised.fill").labelStyle(.titleAndIcon)
+                            .font(.system(size: 10, weight: .bold)).foregroundStyle(.orange)
+                    }
+                    if !finished.isEmpty {
+                        Label("\(finished.count)", systemImage: "checkmark.circle.fill").labelStyle(.titleAndIcon)
+                            .font(.system(size: 10, weight: .bold)).foregroundStyle(.green)
+                    }
+                }
+                .help("\(waiting.count) waiting for you, \(finished.count) finished and not seen yet · ⌘J goes to the next one")
+                .contextMenu { Button("Mark All Read") { store.markAllRead() } }
+            }
+        }
+    }
+}
+
+/// One host's part of the sidebar: its groups, ungrouped sessions, Others, ports and ended ones.
+struct HostSection2: View {
+    @EnvironmentObject var store: SessionStore
+    var host: String
+
+    var body: some View {
+        Section {
+            let health = store.health[host] ?? .unknown
+            if let hint = health.hint, health != .ok {
+                Text(hint).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            // This host's groups (folders), then its ungrouped sessions.
+            ForEach(store.state.groups(for: host), id: \.self) { g in
+                GroupNode(host: host, group: g)
+            }
+            ForEach(store.ungroupedSessions(for: host).filter { !$0.ended }) { rec in
+                SidebarRow(rec: rec).tag(rec.key)
+            }
+            let others = store.otherSessions(for: host)
+            if !others.isEmpty { OthersNode(host: host, sessions: others) }
+            if host != localHost && (!(store.hostPorts[host] ?? []).isEmpty || !(store.state.forwards[host] ?? []).isEmpty) {
+                PortsNode(host: host)
+            }
+            let ended = store.sessions(for: host).filter { $0.ended && !$0.isOutside }
+            if !ended.isEmpty { EndedNode(host: host, sessions: ended) }
+        } header: {
+            HostHeader(host: host)
+                .dropDestination(for: String.self) { keys, _ in
+                    // Dropping on the host header takes a session out of its group.
+                    let ks = keys.filter { store.state.sessions[$0]?.host == host }
+                    Task { for k in ks { do { try await store.setGroup(key: k, group: nil) } catch { Actions.report(store, error) } } }
+                    return true
+                }
+                .contextMenu {
+                    Button("New Session on \(store.hostLabel(host))…") { Actions.newSession(store, host: host, group: nil) }
+                    Button("New Group on \(store.hostLabel(host))…") { Actions.newGroup(store, host: host) }
+                    Divider()
+                    Button("Mark All Read on \(store.hostLabel(host))") { store.markAllRead(host: host) }
+                    Button("Sleep Idle Agents on \(store.hostLabel(host))") { Actions.sleepIdle(store, host: host) }
+                }
         }
     }
 }
@@ -542,7 +626,7 @@ struct GroupNode: View {
 
     var body: some View {
         DisclosureGroup(isExpanded: $ui.expanded) {
-            let members = store.sessions(inGroup: group, host: host)
+            let members = store.sessions(inGroup: group, host: host).filter { !$0.ended }
             if members.isEmpty {
                 Text("Drag \(store.hostLabel(host)) sessions here").font(.caption).foregroundStyle(.secondary)
             }
@@ -571,7 +655,7 @@ struct GroupNode: View {
                         .background(Capsule().fill(Color.orange.opacity(0.3))).foregroundStyle(.orange)
                         .help("\(waitingN) waiting for input")
                 }
-                Text("\(store.sessions(inGroup: group, host: host).count)").font(.caption).foregroundStyle(.secondary)
+                Text("\(store.sessions(inGroup: group, host: host).filter { !$0.ended }.count)").font(.caption).foregroundStyle(.secondary)
             }
             .contentShape(Rectangle())
             .dropDestination(for: String.self) { keys, _ in
@@ -606,34 +690,49 @@ struct HostHeader: View {
 
     var body: some View {
         let health = store.health[host] ?? .unknown
-        HStack(spacing: 6) {
+        HStack(spacing: 7) {
+            Circle().fill(health == .ok ? Color.green : (health == .unknown ? Color.secondary.opacity(0.5) : Color.orange))
+                .frame(width: 6, height: 6)
+                .help(health == .ok ? "Connected" : health.label)
             Text(host == localHost ? "This Mac" : host)
-            let waitingCount = store.sessions(for: host).filter { store.status(of: $0) == .waiting }.count
-            if waitingCount > 0 {
-                Text("\(waitingCount) waiting").font(.caption2).fontWeight(.semibold)
-                    .padding(.horizontal, 5).padding(.vertical, 1)
-                    .background(Capsule().fill(Color.orange.opacity(0.25)))
-                    .foregroundStyle(.orange)
+                .font(.system(size: 11, weight: .bold)).textCase(.uppercase).tracking(0.4)
+            if health != .ok && health != .unknown {
+                Text(health.label).font(.system(size: 10, weight: .semibold)).foregroundStyle(.orange)
             }
+            Spacer(minLength: 4)
             if let m = store.hostMemory[host] {
                 MemoryChip(host: host, mem: m)
             }
-            let unreadN = store.unreadCount(host: host)
-            if unreadN > 0 {
-                Text("\(unreadN) new").font(.caption2).fontWeight(.semibold)
-                    .padding(.horizontal, 5).padding(.vertical, 1)
-                    .background(Capsule().fill(Color.blue.opacity(0.22)))
-                    .foregroundStyle(.blue)
-                    .help("\(unreadN) finished, not seen yet")
+        }
+    }
+}
+
+/// A host's ended sessions, folded away under one line, with Resume all and Clear.
+struct EndedNode: View {
+    @EnvironmentObject var store: SessionStore
+    var host: String
+    var sessions: [SessionRecord]
+    @StateObject private var ui = PortsNodeModel()
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $ui.expanded) {
+            ForEach(sessions.sorted { $0.name < $1.name }) { rec in
+                SidebarRow(rec: rec).tag(rec.key)
             }
-            if health != .ok {
-                Text(health.label).font(.caption2)
-                    .padding(.horizontal, 4).padding(.vertical, 1)
-                    .background(Capsule().fill(Color.orange.opacity(0.2)))
-            }
-            Spacer()
-            if store.sessions(for: host).contains(where: \.ended) {
-                Button("Clear ended") { store.dismissEnded(host: host) }.buttonStyle(.borderless).font(.caption2)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "stop.circle").foregroundStyle(.secondary)
+                Text("Ended").foregroundStyle(.secondary)
+                Text("\(sessions.count)").font(.caption).foregroundStyle(.tertiary)
+                Spacer()
+                if sessions.contains(where: { $0.agent != nil }) {
+                    Button("Resume all") { Actions.resumeAll(store, host: host) }
+                        .buttonStyle(.borderless).font(.caption)
+                        .help("Resume every ended Claude/Codex session here, each in its own conversation")
+                }
+                Button("Clear") { store.dismissEnded(host: host) }
+                    .buttonStyle(.borderless).font(.caption).foregroundStyle(.secondary)
+                    .help("Remove the ended sessions from the list")
             }
         }
     }
@@ -648,38 +747,39 @@ struct SidebarRow: View {
     var inInbox = false
 
     var body: some View {
-        let status = store.status(of: rec)
-        let waiting = status == .waiting
-        let unread = rec.unread && !waiting && !rec.ended
-        HStack(spacing: 8) {
-            StatusDot(status: status)
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 4) {
-                    if unread { Circle().fill(Color.blue).frame(width: 7, height: 7).help("Finished — not seen yet") }
-                    Text(rec.name).lineLimit(1).foregroundStyle(rec.ended ? .secondary : .primary)
-                        .fontWeight(waiting || unread ? .semibold : .regular)
+        let p = store.presence(of: rec)
+        let waiting = p == .waiting
+        let unread = p == .done
+        HStack(spacing: 10) {
+            AgentBadge(kind: store.agentKind(of: rec), presence: p, size: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
+                    Text(rec.name).lineLimit(1)
+                        .font(.system(size: 13, weight: waiting || unread ? .semibold : .medium))
+                        .foregroundStyle(rec.ended ? .secondary : .primary)
+                    if unread { Circle().fill(Color.blue).frame(width: 6, height: 6).help("Finished — not seen yet") }
                 }
-                Text(subtitle(status: status, waiting: waiting, unread: unread))
-                    .font(.caption).foregroundStyle(waiting ? Color.orange : (unread ? Color.blue : .secondary)).lineLimit(1)
-                    .fontWeight(waiting ? .semibold : .regular)
-                if inInbox && unread, let reply = rec.lastReply, !reply.isEmpty {
-                    Text(reply).font(.caption2).foregroundStyle(.secondary).lineLimit(1).help(reply)
-                }
+                Text(inInbox && rec.host != localHost ? "\(store.hostLabel(rec.host)) · \(store.activity(of: rec))" : store.activity(of: rec))
+                    .font(.system(size: 11))
+                    .foregroundStyle(waiting ? Color.orange : .secondary)
+                    .lineLimit(1)
+                    .help(store.activity(of: rec))
             }
             Spacer(minLength: 0)
-            if let kb = store.live[rec.key]?.memoryKB, kb >= 1_048_576, !rec.ended {
-                Text(formatKB(kb)).font(.caption2.monospacedDigit())
-                    .foregroundStyle(kb >= 8 * 1_048_576 ? Color.orange : .secondary)
-                    .help("Memory used by this session's processes")
+            VStack(alignment: .trailing, spacing: 3) {
+                if p.isNotable && !(hover.on && !rec.ended) { StatusPill(presence: p, iconOnly: true) }
+                if let kb = store.live[rec.key]?.memoryKB, kb >= 1_048_576, !rec.ended, !hover.on {
+                    Text(formatKB(kb)).font(.system(size: 10).monospacedDigit())
+                        .foregroundStyle(kb >= 8 * 1_048_576 ? Color.orange : .secondary)
+                        .help("Memory used by this session's processes")
+                }
             }
-            if waiting { Image(systemName: "hand.raised.fill").font(.caption).foregroundStyle(.orange).help("Waiting for your input") }
-            if rec.sleep != nil { Image(systemName: "moon.zzz.fill").font(.caption).foregroundStyle(.indigo).help("Agent asleep — open the session to wake it") }
-            if !rec.ended && (hover.on || store.selectedKey == rec.key) {
+            if !rec.ended && (hover.on || store.selectedKey == rec.key) && hover.on {
                 Menu {
                     Button("Close Pane (keeps running)") { store.closePane(key: rec.key) }
                         .disabled(store.embedded.session(rec.key) == nil)
                     Button("Kill Session…", role: .destructive) { Actions.kill(store, rec) }
-                } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                } label: { Image(systemName: "ellipsis.circle.fill").foregroundStyle(.secondary) }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
                 .fixedSize()
@@ -687,8 +787,7 @@ struct SidebarRow: View {
             }
         }
         .onHover { hover.on = $0 }
-        .padding(.vertical, 2).padding(.horizontal, 4)
-        .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.opacity(waiting ? 0.16 : 0)))
+        .padding(.vertical, 4).padding(.horizontal, 2)
         .modifier(DraggableUnlessOutside(rec: rec))
         .contextMenu {
             if rec.isOutside {
@@ -754,11 +853,9 @@ struct MemoryChip: View {
         Button {
             store.memoryPopoverHost = host
         } label: {
-            Text("\(Int((Double(mem.usedKB) / 1_048_576).rounded()))/\(Int((Double(mem.totalKB) / 1_048_576).rounded())) GB")
-                .font(.caption2.monospacedDigit()).fontWeight(level == .normal ? .regular : .semibold)
-                .foregroundStyle(color)
-                .padding(.horizontal, 4).padding(.vertical, 1)
-                .background(Capsule().fill(color.opacity(level == .normal ? 0.08 : 0.2)))
+            MemoryBar(mem: mem, level: level, width: 30)
+                .padding(.horizontal, 4).padding(.vertical, 2)
+                .background(Capsule().fill(color.opacity(level == .normal ? 0 : 0.15)))
         }
         .buttonStyle(.plain)
         .help("Memory: \(Int(mem.usedPercent))% used — click for the biggest sessions and processes")
@@ -892,13 +989,7 @@ struct DetailPane: View {
                 }
             }
         } else {
-            VStack(spacing: 14) {
-                LaunchAnimationView(dark: colorScheme == .dark)
-                    .frame(width: 220, height: 220)
-                Text("Muxbar").font(.title2).fontWeight(.semibold)
-                Text("Select a session, or create one with +.").foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            HomeDashboard()
         }
     }
 
@@ -916,21 +1007,52 @@ struct DetailHeader: View {
     var rec: SessionRecord
 
     var body: some View {
-        let status = store.status(of: rec)
-        HStack(spacing: 8) {
-            Circle().fill(status.color).frame(width: 9, height: 9)
-            Text(rec.name).font(.headline)
-            Text("· \(rec.host == localHost ? "This Mac" : rec.host)").foregroundStyle(.secondary)
-            if let p = rec.path { Text("· \(p)").foregroundStyle(.secondary).lineLimit(1).truncationMode(.head) }
-            Spacer()
-            Text(status.label).font(.caption).foregroundStyle(.secondary)
-            if !rec.ended {
-                Button { Actions.rename(store, rec) } label: { Image(systemName: "pencil") }.help("Rename")
-                Button { Actions.kill(store, rec) } label: { Image(systemName: "trash") }.help("Kill session")
+        let p = store.presence(of: rec)
+        VStack(spacing: 0) {
+            // A thin line in the status colour along the top: a waiting session reads from across the room.
+            Rectangle().fill(p.isNotable ? p.color : Color.clear).frame(height: 2)
+            HStack(spacing: 10) {
+                AgentBadge(kind: store.agentKind(of: rec), presence: p, size: 26)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 8) {
+                        Text(rec.name).font(.system(size: 14, weight: .semibold)).lineLimit(1)
+                        StatusPill(presence: p, compact: true)
+                    }
+                    Text(store.activity(of: rec)).font(.caption)
+                        .foregroundStyle(p == .waiting ? Color.orange : .secondary).lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                FolderChip(rec: rec)
+                if !rec.ended {
+                    HStack(spacing: 2) {
+                        if rec.sleep != nil {
+                            iconButton("sun.max", "Wake the agent") { Actions.wake(store, rec) }
+                        } else if store.agentKind(of: rec) != nil {
+                            iconButton("moon.zzz", "Sleep the agent (frees ~\(formatKB(store.live[rec.key]?.memoryKB ?? 0)))") { Actions.sleep(store, rec) }
+                                .disabled(store.status(of: rec) != .idle)
+                        }
+                        if store.settings.terminal == .embedded {
+                            iconButton(store.gridKeys.contains(rec.key) ? "square.grid.2x2.fill" : "square.grid.2x2",
+                                       store.gridKeys.contains(rec.key) ? "Remove from the grid" : "Add to the grid (⌘-click in the list)") {
+                                if store.gridKeys.contains(rec.key) { store.removeFromGrid(rec.key) } else { store.toggleInGrid(rec.key) }
+                            }
+                        }
+                        iconButton("pencil", "Rename") { Actions.rename(store, rec) }
+                        iconButton("trash", "Kill session") { Actions.kill(store, rec) }
+                    }
+                } else {
+                    Button("Resume") { Actions.resumeEnded(store, rec) }.buttonStyle(.borderedProminent).controlSize(.small)
+                }
             }
+            .padding(.horizontal, 12).padding(.vertical, 7)
         }
-        .buttonStyle(.borderless)
-        .padding(.horizontal, 12).padding(.vertical, 7)
+        .background(p == .waiting ? Color.orange.opacity(0.06) : Color.clear)
+    }
+
+    private func iconButton(_ symbol: String, _ help: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) { Image(systemName: symbol).frame(width: 26, height: 22) }
+            .buttonStyle(.borderless)
+            .help(help)
     }
 }
 
@@ -950,6 +1072,7 @@ struct PaneView: View {
                 if store.state.layout == .grid, store.gridKeys.contains(rec.key), store.focusedTile != rec.key { store.focusTile(rec.key) }
             }
                 .padding(.trailing, rec.tmuxID != nil ? 14 : 0)
+                .padding(.leading, 6).padding(.top, 4)
             if rec.tmuxID != nil, pane.isRunning {
                 HistoryScrollBar(key: rec.key)
             }
@@ -957,7 +1080,7 @@ struct PaneView: View {
                 VStack(spacing: 10) {
                     Image(systemName: "bolt.horizontal.circle").font(.system(size: 30))
                     Text("Disconnected\(code.map { " (exit \($0))" } ?? "")").font(.headline)
-                    Text(rec.isPlainTab ? "The command ended." : "The tmux session is still running on \(rec.host == localHost ? "this Mac" : rec.host).")
+                    Text(rec.isPlainTab ? "The command ended." : "The connection to \(rec.host == localHost ? "this Mac's" : rec.host + "'s") tmux session closed. Reconnect checks it's still there first.")
                         .foregroundStyle(.secondary)
                     Button("Reconnect") { Actions.reconnect(store, rec) }
                         .keyboardShortcut(.defaultAction)
